@@ -154,6 +154,26 @@ export function buildApp(config: RelayConfig): FastifyInstance {
   app.addContentTypeParser("*", (_req, payload, done) => done(null, payload));
 
   app.addHook("onRequest", (request, reply, done) => {
+    // A site reachable at both www and non-www serves every page twice under a
+    // different URL, which search engines treat as duplicate content and split
+    // ranking signals between the two. inbrowser.tech (config.json's app.domain)
+    // is the canonical, apex form, so any www host is redirected there rather
+    // than the reverse. This runs first and returns without calling done(): a
+    // reply already sent must not fall through to the rest of the hook, or the
+    // redirect response would pick up CORS/isolation headers meant for a page
+    // that was never served. 301, not 302, so a crawler drops the www URL from
+    // its index instead of keeping both alive indefinitely.
+    const host = request.headers.host;
+    if (host?.startsWith("www.")) {
+      const proto = request.headers["x-forwarded-proto"] ?? "https";
+      reply
+        .code(301)
+        .header("Location", `${proto}://${host.slice(4)}${request.raw.url}`)
+        .header("Cache-Control", "public, max-age=3600")
+        .send();
+      return;
+    }
+
     // fetch() sends no Content-Type when the body is null, and Fastify answers
     // a content-type-less POST with 415 before any handler runs. Proxied GETs
     // are exactly that shape - relayFetch.ts passes `init.body ?? null`, so
