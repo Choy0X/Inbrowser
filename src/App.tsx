@@ -56,6 +56,7 @@ import { RUN_CODE_SYSTEM_PROMPT } from "./lib/tools/codeTools";
 import { backupFilename, exportBackup, mergeById, parseBackup, restoreSkills } from "./lib/backup";
 import type { Preferences } from "./lib/preferences";
 import { promptScaleFor } from "./lib/promptScale";
+import { RICH_OUTPUT_SYSTEM_PROMPT } from "./lib/richOutput";
 import { recoverFencedArtifactMessage } from "./lib/artifactRecovery";
 import {
   COMPACT_SYSTEM_PROMPT,
@@ -667,6 +668,9 @@ export default function App() {
         });
         if (scale.artifacts) {
           context.push({ id: newId(), role: "system", content: ARTIFACT_SYSTEM_PROMPT, timestamp: Date.now() });
+        }
+        if (scale.richOutput) {
+          context.push({ id: newId(), role: "system", content: RICH_OUTPUT_SYSTEM_PROMPT, timestamp: Date.now() });
         }
         if (hasRunCode && !scale.compact) {
           context.push({ id: newId(), role: "system", content: RUN_CODE_SYSTEM_PROMPT, timestamp: Date.now() });

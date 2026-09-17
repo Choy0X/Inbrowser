@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { useIsDarkTheme } from "../lib/useIsDarkTheme";
 
 /** Loaded once and reused - mermaid's own module cache does the same, but this
  * avoids a repeat dynamic import() for every diagram on the page. */
@@ -6,30 +7,6 @@ let mermaidPromise: Promise<typeof import("mermaid")> | null = null;
 function loadMermaid() {
   if (!mermaidPromise) mermaidPromise = import("mermaid");
   return mermaidPromise;
-}
-
-function isDarkTheme(): boolean {
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "dark") return true;
-  if (attr === "light") return false;
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
-}
-
-/** Re-renders callers when the app's light/dark mode changes. */
-function useIsDarkTheme(): boolean {
-  const [dark, setDark] = useState(isDarkTheme);
-  useEffect(() => {
-    const update = () => setDark(isDarkTheme());
-    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-    media?.addEventListener("change", update);
-    const observer = new MutationObserver(update);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    return () => {
-      media?.removeEventListener("change", update);
-      observer.disconnect();
-    };
-  }, []);
-  return dark;
 }
 
 /** Renders a ```mermaid fenced code block as a diagram, falling back to the

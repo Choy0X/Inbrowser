@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.3.0",
+    "date": "2026-09-17",
+    "items": [
+      "Charts. Ask for one and you get a real chart with hover values, drawn from the data rather than described in prose. Every chart also shows its numbers as a table and exports them as CSV.",
+      "Tables you can use: click a column to sort, numbers line up in columns, long tables keep their header in view, and any table exports to CSV.",
+      "Diagrams and maths now get offered. Timelines, flowcharts, sequence and gantt diagrams and typeset formulas already rendered here, but nothing told the assistant so - it only used them by luck. Now it knows."
+    ]
+  },
+  {
     "version": "0.2.0",
     "date": "2026-09-17",
     "items": [

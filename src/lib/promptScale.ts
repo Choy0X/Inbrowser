@@ -35,6 +35,12 @@ export interface PromptScale {
   compact: boolean;
   /** Send the artifact contract at all. */
   artifacts: boolean;
+  /**
+   * Tell the model that diagrams, maths and charts render (richOutput.ts).
+   * Tracks `compact`: the same models that cannot hold the artifact contract
+   * cannot hold a second capability list either, and would echo it instead.
+   */
+  richOutput: boolean;
   /** Why, for the settings UI and for explaining a missing feature. */
   reason?: string;
 }
@@ -45,6 +51,7 @@ export function promptScaleFor(modelId: string, caps?: Pick<ModelCapabilities, "
     return {
       compact: true,
       artifacts: false,
+      richOutput: false,
       reason: `${params}B models do not reliably follow the file-artifact contract, so it is left out to keep ordinary replies working.`,
     };
   }
@@ -54,9 +61,10 @@ export function promptScaleFor(modelId: string, caps?: Pick<ModelCapabilities, "
     return {
       compact: true,
       artifacts: false,
+      richOutput: false,
       reason: `A ${context.toLocaleString()}-token context is too small to add the file-artifact contract reliably.`,
     };
   }
 
-  return { compact: false, artifacts: true };
+  return { compact: false, artifacts: true, richOutput: true };
 }

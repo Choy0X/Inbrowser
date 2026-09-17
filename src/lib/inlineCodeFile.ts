@@ -12,7 +12,7 @@ import { classify } from "./fencedCodeArtifacts";
  */
 
 /** Fences that already have their own renderer and must never become a file. */
-const NON_FILE_LANGS = new Set(["mermaid", "latex", "tex", "math"]);
+const NON_FILE_LANGS = new Set(["mermaid", "latex", "tex", "math", "chart"]);
 
 /**
  * Whether a fenced block should render as an interactive file.

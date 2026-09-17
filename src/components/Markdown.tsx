@@ -9,8 +9,11 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { SearchResult } from "../lib/types";
 import { normalizeCitationMarkers } from "../lib/citations";
 import { normalizeMathDelimiters } from "../lib/mathDelimiters";
+import { flattenNode } from "../lib/flattenNode";
 import { codeFileEligible, inlineCodeKey } from "../lib/inlineCodeFile";
+import { ChartBlock } from "./ChartBlock";
 import { CitationPopover } from "./CitationPopover";
+import { DataTable } from "./DataTable";
 import { CodeBlockHeader } from "./CodeBlockHeader";
 import { InlineCodeFile } from "./InlineCodeFile";
 import { MermaidDiagram } from "./MermaidDiagram";
@@ -123,13 +126,6 @@ function rehypeCitations() {
  * Shared markdown renderers
  * ------------------------------------------------------------------------- */
 
-function flattenText(node: ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(flattenText).join("");
-  return "";
-}
-
 const SAFE_URL_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
 
 /**
@@ -153,6 +149,9 @@ function isSafeHref(href: string | undefined): boolean {
  * highlighted code (see LatexBlock.tsx for why this can't be left to
  * rehype-katex's own, narrower `language-math` support). */
 const LATEX_FENCE_LANGS = new Set(["latex", "tex", "math"]);
+
+/** A data chart, drawn from a small JSON spec - see lib/charts/chartSpec.ts. */
+const CHART_FENCE_LANG = "chart";
 
 /* ---------------------------------------------------------------------------
  * Interactive code blocks.
@@ -229,6 +228,9 @@ function buildComponents({
       if (match && LATEX_FENCE_LANGS.has(match[1])) {
         return <LatexBlock code={code} streaming={streaming} />;
       }
+      if (match?.[1] === CHART_FENCE_LANG) {
+        return <ChartBlock code={code} streaming={streaming} />;
+      }
       if (rendersAsFile(!!interactiveCode, !!streaming, match?.[1], code)) {
         const index = indexBlock(node, code);
         const key = inlineCodeKey(code, index);
@@ -270,7 +272,8 @@ function buildComponents({
       const lang = Array.isArray(codeClassName)
         ? codeClassName.find((c: unknown) => typeof c === "string" && c.startsWith("language-"))?.slice(9)
         : undefined;
-      if (lang === "mermaid" || LATEX_FENCE_LANGS.has(lang)) return <>{children}</>;
+      if (lang === "mermaid" || lang === CHART_FENCE_LANG || LATEX_FENCE_LANGS.has(lang))
+        return <>{children}</>;
       const code = String(codeNode?.children?.[0]?.value ?? "").replace(/\n$/, "");
       if (rendersAsFile(!!interactiveCode, !!streaming, lang, code)) return <>{children}</>;
       return (
@@ -280,7 +283,9 @@ function buildComponents({
       );
     },
     a: (props: any) => anchor({ ...props, onLinkClick }),
-    table,
+    // Sortable/exportable only in chat, for the same reason InlineCodeFile is:
+    // a fetched web page or a skill file is someone else's document.
+    table: interactiveCode ? DataTable : table,
   };
 }
 
@@ -516,7 +521,7 @@ interface CiteBadgeProps {
 }
 
 function CiteBadge({ children, citations }: CiteBadgeProps) {
-  const index = parseInt(flattenText(children).trim(), 10);
+  const index = parseInt(flattenNode(children).trim(), 10);
   const result = citations[index - 1];
 
   if (!result) {

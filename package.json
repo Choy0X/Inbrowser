@@ -1,7 +1,7 @@
 {
   "name": "inbrowser",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "description": "The whole AI stack in one browser tab. Local models, twelve language runtimes, agents and skills. No account, no API key, no server.",
@@ -50,6 +50,7 @@
     "@tanstack/react-virtual": "^3.14.10",
     "@zenfs/dom": "^1.2.14",
     "browsercc": "^0.1.1",
+    "chart.js": "^4.5.1",
     "docx": "^9.7.1",
     "esbuild-wasm": "^0.28.2",
     "fastify": "5.12.5",

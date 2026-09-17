@@ -91,6 +91,29 @@
   --code-bg: 1 1 32;
   --code-fg: 233 233 245;
 
+  /* Categorical chart series. Validated against this app's own surfaces with
+   * the data-viz palette checker rather than assumed: lightness band, chroma
+   * floor, colour-blind separation (protan/deutan), normal-vision separation
+   * and contrast, in both modes.
+   *
+   * Slot ORDER is the colour-blind-safety mechanism, not decoration - assign
+   * in order, never cycle, never re-sort.
+   *
+   * Caps that follow from the measurements, enforced in lib/charts/chartSpec.ts:
+   * bar/line/area may use all 8 (only adjacent pairs ever touch); scatter
+   * compares every pair at once and stops at 3, because the 4th slot puts
+   * yellow beside orange and fails the all-pairs floor. On white, slots 3/4/5
+   * fall under 3:1, so a chart must always offer its table view - that is what
+   * ChartBlock's Table toggle is for, not convenience. */
+  --chart-1: 42 120 214; /* blue #2a78d6 */
+  --chart-2: 235 104 52; /* orange #eb6834 */
+  --chart-3: 27 175 122; /* aqua #1baf7a */
+  --chart-4: 237 161 0; /* yellow #eda100 */
+  --chart-5: 232 123 164; /* magenta #e87ba4 */
+  --chart-6: 0 131 0; /* green #008300 */
+  --chart-7: 74 58 167; /* violet #4a3aa7 */
+  --chart-8: 227 73 72; /* red #e34948 */
+
   /* The one piece of decorative chrome in the system: a fixed 3-stop
    * gradient, used only at large, blurred scale (see .brand-gradient-wash)
    * — never shrunk to icon size, never fewer/more than 3 stops. */
@@ -180,6 +203,29 @@
 
   --code-bg: 1 1 32;
   --code-fg: 233 233 245;
+
+  /* Categorical chart series. Validated against this app's own surfaces with
+   * the data-viz palette checker rather than assumed: lightness band, chroma
+   * floor, colour-blind separation (protan/deutan), normal-vision separation
+   * and contrast, in both modes.
+   *
+   * Slot ORDER is the colour-blind-safety mechanism, not decoration - assign
+   * in order, never cycle, never re-sort.
+   *
+   * Caps that follow from the measurements, enforced in lib/charts/chartSpec.ts:
+   * bar/line/area may use all 8 (only adjacent pairs ever touch); scatter
+   * compares every pair at once and stops at 3, because the 4th slot puts
+   * yellow beside orange and fails the all-pairs floor. On white, slots 3/4/5
+   * fall under 3:1, so a chart must always offer its table view - that is what
+   * ChartBlock's Table toggle is for, not convenience. */
+  --chart-1: 57 135 229; /* blue #3987e5 */
+  --chart-2: 217 89 38; /* orange #d95926 */
+  --chart-3: 25 158 112; /* aqua #199e70 */
+  --chart-4: 201 133 0; /* yellow #c98500 */
+  --chart-5: 213 81 129; /* magenta #d55181 */
+  --chart-6: 0 131 0; /* green #008300 */
+  --chart-7: 144 133 233; /* violet #9085e9 */
+  --chart-8: 230 103 103; /* red #e66767 */
 
   --shadow-soft: 0 0 0 0 rgb(0 0 0 / 0);
   --shadow-lift: 0 4px 14px rgb(0 0 0 / 0.45);
@@ -275,6 +321,14 @@
  * it carries the hairline the rest of the app uses for elevation. */
 [data-ui="code-file"] {
   border: 1px solid rgb(var(--border-subtle));
+}
+/* A chart card sits on the elevated surface rather than the code canvas: its
+ * marks are drawn from the --chart-* tokens and need the page's own background
+ * behind them, which is what those colours were contrast-validated against. */
+[data-ui="chart-block"] {
+  border: 1px solid rgb(var(--border-subtle));
+  border-radius: var(--radius-lg);
+  overflow: hidden;
 }
 
 html,
