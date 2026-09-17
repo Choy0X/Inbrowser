@@ -33,6 +33,12 @@ export function MermaidDiagram({ code, streaming }: { code: string; streaming?: 
           securityLevel: "strict",
           theme: dark ? "dark" : "default",
           fontFamily: "inherit",
+          // Without this, mermaid.render() never throws on a parse error - it
+          // draws its own oversized error diagram (bomb icon, "Syntax error in
+          // text" + hardcoded version string) straight into the returned SVG,
+          // which bypasses the catch block below and this component's bounded
+          // <pre> fallback, so the diagram spills past the page.
+          suppressErrorRendering: true,
         });
         const { svg: rendered } = await mermaid.render(`mermaid-${rawId}`, code);
         if (!cancelled) setSvg(rendered);
