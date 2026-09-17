@@ -95,6 +95,13 @@ export function privacyPolicySections(brand: PolicyBrand): PolicySection[] {
       ],
     },
     {
+      title: "Site analytics",
+      paragraphs: [
+        `${app}'s public site uses Google Analytics to measure aggregate traffic to ${brand.url} - which pages are visited, roughly how many people, and where from. It works by a script that sets a cookie and reports page views to Google, whose own privacy policy governs what happens to that data on their side.`,
+        `It sees which page you loaded, never what you typed. A conversation page reports only that a conversation page was viewed, not which one - the conversation's own address never reaches Google, the same way it never reaches a server of ours. A build with no analytics id configured, which is the default for anyone self-hosting this repository, loads no analytics at all.`,
+      ],
+    },
+    {
       title: "Changes to this policy",
       paragraphs: [
         "This page reflects the app's current, actual behavior rather than a static legal document, so it is updated alongside the app itself. See the change log for a history of what shipped.",

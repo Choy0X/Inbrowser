@@ -63,13 +63,13 @@ export const SEO_ROUTES: SeoRoute[] = [
     path: "/",
     title: "",
     description:
-      "Run AI models, twelve language runtimes, agents and skills entirely inside one browser tab. No account, no API key, no server.",
+      "Run AI models, twelve language runtimes, agents and skills entirely inside one browser tab on your own device. No account, no API key, no server needed.",
     h1: "InBrowser",
     intro:
       "InBrowser is a complete AI workspace that runs in a browser tab. Models, code execution, storage, agents and skills all execute on your own device. There is no account to create, no API key required to start, and no server of ours that sees your conversations.",
     sections: [
       {
-        heading: "Models that run on your own device",
+        heading: "AI models that run on your own device",
         body: "Over 160 open models can be downloaded once and then run locally on WebGPU through WebLLM, with no network call and no rate limit afterwards. Chrome's built-in Gemini Nano works with no download at all. A local model has no key, no quota, and keeps working with the network switched off.",
       },
       {

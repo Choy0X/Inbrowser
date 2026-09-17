@@ -48,6 +48,7 @@ export interface PublicConfig {
     streamIdleTimeoutMs: number;
     maxRoutingAttempts: number;
     suggestionsEnabled: boolean;
+    analyticsId: string;
   };
 }
 
@@ -113,3 +114,10 @@ export const MAX_ROUTING_ATTEMPTS = config.client.maxRoutingAttempts;
  * silently losing the feature.
  */
 export const SUGGESTIONS_ENABLED = config.client.suggestionsEnabled !== false;
+
+/**
+ * GA4 Measurement ID. Empty (the default a fork of this repository keeps)
+ * disables analytics entirely - see src/lib/analytics.ts, the one place this
+ * is read.
+ */
+export const APP_ANALYTICS_ID = config.client.analyticsId || "";

@@ -65,7 +65,10 @@
     "_maxRoutingAttempts": "How many models and proxies \"auto\" may try before giving up on a turn.",
 
     "suggestionsEnabled": true,
-    "_suggestionsEnabled": "Whether the chat empty state fetches its starter prompts from GET /v1/suggestions on this deployment's own server. This is the ONLY first-party API call the client makes on an ordinary page load; it sends a day part and up to three model-capability booleans, and no identifier, chat content or history. Set false for a build hosted on a CDN with no server of its own - it would otherwise request a 404 on every visit - and the suggestion grid is simply not rendered."
+    "_suggestionsEnabled": "Whether the chat empty state fetches its starter prompts from GET /v1/suggestions on this deployment's own server. This is the ONLY first-party API call the client makes on an ordinary page load; it sends a day part and up to three model-capability booleans, and no identifier, chat content or history. Set false for a build hosted on a CDN with no server of its own - it would otherwise request a 404 on every visit - and the suggestion grid is simply not rendered.",
+
+    "analyticsId": "G-T9T4EZ4LE8",
+    "_analyticsId": "GA4 Measurement ID, from Google Analytics > Admin > Data Streams (that stream's own id, 15799240062, never appears in code - only the Measurement ID does). Empty disables analytics entirely, which is the default a fork of this repository should keep: without it, a self-hosted deployment would silently report its visitors to InBrowser's own GA property."
   },
 
   "server": {

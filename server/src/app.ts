@@ -198,6 +198,20 @@ export function buildApp(config: RelayConfig): FastifyInstance {
     reply.raw.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     reply.raw.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
 
+    // Tells a browser that has ever seen this host over HTTPS to never again
+    // try it over plain HTTP, closing the window a stripping proxy (or a typed
+    // "http://" link) would otherwise get. Skipped in dev: `config.dev` there
+    // is served over plain HTTP with no Caddy/Cloudflare in front, and a
+    // browser is required by spec to ignore this header outside HTTPS anyway -
+    // the guard just keeps a dev response from carrying a header that could
+    // never mean anything on it. includeSubDomains and preload are both true
+    // because every subdomain here (see the www redirect above and the
+    // wildcard Caddy block) already terminates real TLS with the same origin
+    // certificate, which is the precondition for either to be safe.
+    if (!config.dev) {
+      reply.raw.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+    }
+
     const cors = corsHeaders(config, request.headers.origin);
     for (const [name, value] of Object.entries(cors)) reply.raw.setHeader(name, value);
     done();
