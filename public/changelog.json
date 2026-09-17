@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.4.2",
+    "date": "2026-09-18",
+    "items": [
+      "Fixed for real this time: attaching an image and asking about it still failed through a configured proxy after the previous fix - the size limit was on the relay's own connection to the proxy, not the upload to the relay. Large payloads are now split on both hops."
+    ]
+  },
+  {
     "version": "0.4.1",
     "date": "2026-09-18",
     "items": [
