@@ -347,6 +347,8 @@ interface AssistantProps {
   streaming: boolean;
   onRetry: (messageId: string) => void;
   onOpenArtifact: (messageId: string, artifactId: string) => void;
+  onEditCodeBlock?: (messageId: string, key: string, content: string | null) => void;
+  onOpenPlugins?: () => void;
   activeArtifactId?: string;
 }
 function AssistantBubble({
@@ -355,6 +357,8 @@ function AssistantBubble({
   streaming,
   onRetry,
   onOpenArtifact,
+  onEditCodeBlock,
+  onOpenPlugins,
   activeArtifactId,
 }: AssistantProps) {
   const [copied, setCopied] = useState(false);
@@ -378,6 +382,20 @@ function AssistantBubble({
     }
   };
 
+  // Identity-stable so the memoized components map inside Markdown isn't
+  // rebuilt every render — rebuilding it remounts each InlineCodeFile and
+  // discards its draft and run output.
+  const interactive = useMemo(
+    () => ({
+      codeEdits: message.codeEdits,
+      onEditCodeBlock: onEditCodeBlock
+        ? (key: string, content: string | null) => onEditCodeBlock(message.id, key, content)
+        : undefined,
+      onOpenPlugins,
+    }),
+    [message.codeEdits, message.id, onEditCodeBlock, onOpenPlugins]
+  );
+
   return (
     <div className="group flex gap-3">
       <div
@@ -390,9 +408,20 @@ function AssistantBubble({
         {message.reasoning && <ThinkingBlock text={message.reasoning} streaming={streaming} />}
         {displayContent ? (
           prevUserSearchResults && prevUserSearchResults.length > 0 ? (
-            <CitedMarkdown text={displayContent} citations={prevUserSearchResults} streaming={streaming} />
+            <CitedMarkdown
+              text={displayContent}
+              citations={prevUserSearchResults}
+              streaming={streaming}
+              interactiveCode
+              interactive={interactive}
+            />
           ) : (
-            <Markdown text={displayContent} streaming={streaming} />
+            <Markdown
+              text={displayContent}
+              streaming={streaming}
+              interactiveCode
+              interactive={interactive}
+            />
           )
         ) : streaming ? (
           <div className="flex items-center gap-2 py-1 text-fg-dim">
@@ -523,6 +552,9 @@ interface MessageBubbleProps {
   onRetry: (messageId: string) => void;
   onEdit?: (messageId: string, newText: string) => void;
   onOpenArtifact?: (messageId: string, artifactId: string) => void;
+  /** Persists a user edit to one inline fenced code block; `null` reverts it. */
+  onEditCodeBlock?: (messageId: string, key: string, content: string | null) => void;
+  onOpenPlugins?: () => void;
   activeArtifactId?: string;
 }
 
@@ -543,6 +575,8 @@ export const MessageBubble = memo(function MessageBubble({
   onRetry,
   onEdit,
   onOpenArtifact,
+  onEditCodeBlock,
+  onOpenPlugins,
   activeArtifactId,
 }: MessageBubbleProps) {
   if (message.role === "tool") return null;
@@ -565,6 +599,8 @@ export const MessageBubble = memo(function MessageBubble({
       streaming={streaming}
       onRetry={onRetry}
       onOpenArtifact={onOpenArtifact ?? (() => {})}
+      onEditCodeBlock={onEditCodeBlock}
+      onOpenPlugins={onOpenPlugins}
       activeArtifactId={activeArtifactId}
     />
   );

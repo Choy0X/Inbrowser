@@ -82,6 +82,8 @@ interface ChatViewProps {
   onOpenArtifact: (messageId: string, artifactId: string) => void;
   onCloseArtifact: () => void;
   onEditArtifact: (messageId: string, artifactId: string, content: string) => void;
+  /** Persists a user edit to one inline fenced code block; `null` reverts it. */
+  onEditCodeBlock: (messageId: string, key: string, content: string | null) => void;
   onResizeArtifactPanel: (width: number) => void;
   onOpenPlugins: () => void;
 }
@@ -117,6 +119,7 @@ export function ChatView({
   onOpenArtifact,
   onCloseArtifact,
   onEditArtifact,
+  onEditCodeBlock,
   onResizeArtifactPanel,
   onOpenPlugins,
 }: ChatViewProps) {
@@ -303,6 +306,8 @@ export function ChatView({
                         onRetry={onRetry}
                         onEdit={onEditMessage}
                         onOpenArtifact={onOpenArtifact}
+                        onEditCodeBlock={onEditCodeBlock}
+                        onOpenPlugins={onOpenPlugins}
                         activeArtifactId={openArtifact?.messageId === message.id ? openArtifact.artifact.id : undefined}
                       />
                     </div>

@@ -9,8 +9,10 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { SearchResult } from "../lib/types";
 import { normalizeCitationMarkers } from "../lib/citations";
 import { normalizeMathDelimiters } from "../lib/mathDelimiters";
+import { codeFileEligible, inlineCodeKey } from "../lib/inlineCodeFile";
 import { CitationPopover } from "./CitationPopover";
 import { CodeBlockHeader } from "./CodeBlockHeader";
+import { InlineCodeFile } from "./InlineCodeFile";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { LatexBlock } from "./LatexBlock";
 
@@ -152,74 +154,163 @@ function isSafeHref(href: string | undefined): boolean {
  * rehype-katex's own, narrower `language-math` support). */
 const LATEX_FENCE_LANGS = new Set(["latex", "tex", "math"]);
 
-const markdownComponents = {
-  code({ node, className, children, streaming, ...props }: any) {
-    const match = /language-(\w+)/.exec(className || "");
-    const code = String(children).replace(/\n$/, "");
-    if (match?.[1] === "mermaid") {
-      return <MermaidDiagram code={code} streaming={streaming} />;
+/* ---------------------------------------------------------------------------
+ * Interactive code blocks.
+ *
+ * With `interactiveCode` on (chat messages only), a *labelled* fenced block
+ * renders as an InlineCodeFile - a small runnable/editable/downloadable file -
+ * instead of static highlighted text.
+ *
+ * Two deliberate limits:
+ *
+ * - Only a fence with a language tag qualifies. The `code` renderer below is
+ *   also what renders inline `like this` spans, and an untagged fence has
+ *   always fallen through to the same `inline-code` branch; widening the net
+ *   would turn a backticked word mid-sentence into a file card.
+ * - Never while `streaming`. The rich shell appears once the message is
+ *   complete, so nothing here re-mounts per token and there is no draft or run
+ *   output to lose mid-stream.
+ * ------------------------------------------------------------------------- */
+
+/** Both the `code` and the `pre` renderer must agree on this, or a file card
+ *  ends up nested inside a `<pre data-ui="code-block">`. */
+function rendersAsFile(interactiveCode: boolean, streaming: boolean, lang: string | undefined, code: string) {
+  return !!interactiveCode && !streaming && !!lang && codeFileEligible(lang, code);
+}
+
+export interface InteractiveCodeOptions {
+  /** Saved edits for this message's blocks, keyed by inlineCodeKey(). */
+  codeEdits?: Record<string, string>;
+  onEditCodeBlock?: (key: string, content: string | null) => void;
+  onOpenPlugins?: () => void;
+}
+
+/**
+ * Assigns each fenced block its 1-based position in the document, used for the
+ * filename and as part of the stored-edit key. Keyed on the block's source
+ * offset so the same block keeps the same number across re-renders regardless
+ * of the order React happens to call the renderers in; rebuilt whenever the
+ * text changes, since every offset moves with it.
+ */
+function createBlockIndexer() {
+  const seen = new Map<string, number>();
+  return (node: any, code: string): number => {
+    const offset = node?.position?.start?.offset;
+    const key = typeof offset === "number" ? `off:${offset}` : `txt:${code}`;
+    let index = seen.get(key);
+    if (index === undefined) {
+      index = seen.size + 1;
+      seen.set(key, index);
     }
-    if (match && LATEX_FENCE_LANGS.has(match[1])) {
-      return <LatexBlock code={code} streaming={streaming} />;
-    }
-    if (match) {
+    return index;
+  };
+}
+
+function buildComponents({
+  streaming,
+  interactiveCode,
+  interactive,
+  onLinkClick,
+  indexBlock,
+}: {
+  streaming?: boolean;
+  interactiveCode?: boolean;
+  interactive: InteractiveCodeOptions;
+  onLinkClick?: (href: string) => void;
+  indexBlock: ReturnType<typeof createBlockIndexer>;
+}) {
+  return {
+    code({ node, className, children, ...props }: any) {
+      const match = /language-(\w+)/.exec(className || "");
+      const code = String(children).replace(/\n$/, "");
+      if (match?.[1] === "mermaid") {
+        return <MermaidDiagram code={code} streaming={streaming} />;
+      }
+      if (match && LATEX_FENCE_LANGS.has(match[1])) {
+        return <LatexBlock code={code} streaming={streaming} />;
+      }
+      if (rendersAsFile(!!interactiveCode, !!streaming, match?.[1], code)) {
+        const index = indexBlock(node, code);
+        const key = inlineCodeKey(code, index);
+        return (
+          <InlineCodeFile
+            code={code}
+            language={match![1]}
+            index={index}
+            editKey={key}
+            editedCode={interactive.codeEdits?.[key]}
+            onEdit={interactive.onEditCodeBlock}
+            onOpenPlugins={interactive.onOpenPlugins}
+          />
+        );
+      }
+      if (match) {
+        return (
+          <>
+            <CodeBlockHeader language={match[1]} code={code} />
+            <SyntaxHighlighter
+              language={match[1]}
+              style={oneDark}
+              PreTag="div"
+              customStyle={{ margin: 0, background: "transparent" }}
+            >
+              {code}
+            </SyntaxHighlighter>
+          </>
+        );
+      }
+      return <code className="inline-code" {...props}>{children}</code>;
+    },
+    pre({ node, children }: any) {
+      // A rendered mermaid diagram / KaTeX block (or its own error/streaming
+      // fallback <pre>) shouldn't be nested inside another <pre data-ui="code-block">.
+      // Neither should an InlineCodeFile, which draws its own container.
+      const codeNode = node?.children?.[0];
+      const codeClassName = codeNode?.properties?.className;
+      const lang = Array.isArray(codeClassName)
+        ? codeClassName.find((c: unknown) => typeof c === "string" && c.startsWith("language-"))?.slice(9)
+        : undefined;
+      if (lang === "mermaid" || LATEX_FENCE_LANGS.has(lang)) return <>{children}</>;
+      const code = String(codeNode?.children?.[0]?.value ?? "").replace(/\n$/, "");
+      if (rendersAsFile(!!interactiveCode, !!streaming, lang, code)) return <>{children}</>;
       return (
-        <>
-          <CodeBlockHeader language={match[1]} code={code} />
-          <SyntaxHighlighter
-            language={match[1]}
-            style={oneDark}
-            PreTag="div"
-            customStyle={{ margin: 0, background: "transparent" }}
-          >
-            {code}
-          </SyntaxHighlighter>
-        </>
-      );
-    }
-    return <code className="inline-code" {...props}>{children}</code>;
-  },
-  pre({ node, children }: any) {
-    // A rendered mermaid diagram / KaTeX block (or its own error/streaming
-    // fallback <pre>) shouldn't be nested inside another <pre data-ui="code-block">.
-    const codeClassName = node?.children?.[0]?.properties?.className;
-    const lang = Array.isArray(codeClassName)
-      ? codeClassName.find((c: unknown) => typeof c === "string" && c.startsWith("language-"))?.slice(9)
-      : undefined;
-    if (lang === "mermaid" || LATEX_FENCE_LANGS.has(lang)) return <>{children}</>;
-    return (
-      <pre data-ui="code-block" className="code-block">
-        {children}
-      </pre>
-    );
-  },
-  a({ href, children, onLinkClick }: any) {
-    if (!isSafeHref(href)) {
-      return <span className="markdown-unsafe-link">{children}</span>;
-    }
-    if (onLinkClick) {
-      return (
-        <a
-          href={href}
-          onClick={(e: MouseEvent) => {
-            e.preventDefault();
-            onLinkClick(href);
-          }}
-        >
+        <pre data-ui="code-block" className="code-block">
           {children}
-        </a>
+        </pre>
       );
-    }
-    return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
-  },
-  table({ children }: any) {
+    },
+    a: (props: any) => anchor({ ...props, onLinkClick }),
+    table,
+  };
+}
+
+function anchor({ href, children, onLinkClick }: any) {
+  if (!isSafeHref(href)) {
+    return <span className="markdown-unsafe-link">{children}</span>;
+  }
+  if (onLinkClick) {
     return (
-      <div className="markdown-table-wrap">
-        <table>{children}</table>
-      </div>
+      <a
+        href={href}
+        onClick={(e: MouseEvent) => {
+          e.preventDefault();
+          onLinkClick(href);
+        }}
+      >
+        {children}
+      </a>
     );
-  },
-};
+  }
+  return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+}
+
+function table({ children }: any) {
+  return (
+    <div className="markdown-table-wrap">
+      <table>{children}</table>
+    </div>
+  );
+}
 
 /**
  * KaTeX (and its remark/rehype glue) is only fetched once a message actually
@@ -265,12 +356,16 @@ function BaseMarkdown({
   citations,
   onLinkClick,
   streaming,
+  interactiveCode,
+  interactive,
 }: {
   text: string;
   cited?: boolean;
   citations?: SearchResult[];
   onLinkClick?: (href: string) => void;
   streaming?: boolean;
+  interactiveCode?: boolean;
+  interactive?: InteractiveCodeOptions;
 }) {
   const normalized = useMemo(() => normalizeMathDelimiters(text), [text]);
   const hasMath = HAS_DOLLAR_MATH_RE.test(normalized);
@@ -304,14 +399,42 @@ function BaseMarkdown({
     ...(mathReady ? [mathPlugins.rehypeKatex] : []),
     ...(cited ? [rehypeCitations] : []),
   ];
-  const components = {
-    ...markdownComponents,
-    code: (props: any) => markdownComponents.code({ ...props, streaming }),
-    ...(onLinkClick ? { a: (props: any) => markdownComponents.a({ ...props, onLinkClick }) } : {}),
-    ...(cited
-      ? { "cite-badge": (props: any) => <CiteBadge {...props} citations={citations!} /> }
-      : {}),
-  };
+  // Rebuilt from the text, so every block keeps its number across re-renders.
+  const indexBlock = useMemo(() => createBlockIndexer(), [normalized]);
+
+  const codeEdits = interactive?.codeEdits;
+  const onEditCodeBlock = interactive?.onEditCodeBlock;
+  const onOpenPlugins = interactive?.onOpenPlugins;
+
+  // Memoized, and this matters: ReactMarkdown renders these as components, so a
+  // fresh arrow function on every render is a new component *type* to React and
+  // unmounts the whole subtree. An InlineCodeFile would lose its draft and its
+  // run output on any unrelated re-render of the message.
+  const components = useMemo(
+    () => ({
+      ...buildComponents({
+        streaming,
+        interactiveCode,
+        interactive: { codeEdits, onEditCodeBlock, onOpenPlugins },
+        onLinkClick,
+        indexBlock,
+      }),
+      ...(cited
+        ? { "cite-badge": (props: any) => <CiteBadge {...props} citations={citations!} /> }
+        : {}),
+    }),
+    [
+      streaming,
+      interactiveCode,
+      codeEdits,
+      onEditCodeBlock,
+      onOpenPlugins,
+      onLinkClick,
+      indexBlock,
+      cited,
+      citations,
+    ]
+  );
 
   return (
     <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
@@ -329,14 +452,26 @@ export function Markdown({
   text,
   onLinkClick,
   streaming,
+  interactiveCode,
+  interactive,
 }: {
   text: string;
   onLinkClick?: (href: string) => void;
   streaming?: boolean;
+  /** Render fenced code blocks as runnable/editable files. Chat messages only -
+   *  fetched web pages, skill files and agent traces keep plain code blocks. */
+  interactiveCode?: boolean;
+  interactive?: InteractiveCodeOptions;
 }) {
   return (
     <div className="markdown">
-      <BaseMarkdown text={text} onLinkClick={onLinkClick} streaming={streaming} />
+      <BaseMarkdown
+        text={text}
+        onLinkClick={onLinkClick}
+        streaming={streaming}
+        interactiveCode={interactiveCode}
+        interactive={interactive}
+      />
     </div>
   );
 }
@@ -346,10 +481,14 @@ export function CitedMarkdown({
   text,
   citations,
   streaming,
+  interactiveCode,
+  interactive,
 }: {
   text: string;
   citations: SearchResult[];
   streaming?: boolean;
+  interactiveCode?: boolean;
+  interactive?: InteractiveCodeOptions;
 }) {
   // Normalize the RAW string before any parsing: the model sometimes emits
   // citation groups on their own lines / blank-line-separated, which the
@@ -359,7 +498,14 @@ export function CitedMarkdown({
   const normalized = useMemo(() => normalizeCitationMarkers(text), [text]);
   return (
     <div className="markdown">
-      <BaseMarkdown text={normalized} cited citations={citations} streaming={streaming} />
+      <BaseMarkdown
+        text={normalized}
+        cited
+        citations={citations}
+        streaming={streaming}
+        interactiveCode={interactiveCode}
+        interactive={interactive}
+      />
     </div>
   );
 }

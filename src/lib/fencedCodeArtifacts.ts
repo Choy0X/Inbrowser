@@ -53,7 +53,9 @@ const EXT_ALIASES: Record<string, string> = {
   go: "go",
 };
 
-function classify(lang: string, body: string): { type: ArtifactType; language?: string; ext: string } {
+/** Also the single source of the extension an inline code block downloads as -
+ *  see inlineCodeFile.ts, which calls this rather than repeating EXT_ALIASES. */
+export function classify(lang: string, body: string): { type: ArtifactType; language?: string; ext: string } {
   const key = lang.toLowerCase();
   const known = LANG_TO_TYPE[key];
   if (known) return known;

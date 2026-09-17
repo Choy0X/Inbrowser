@@ -543,6 +543,21 @@ export default function App() {
     [appendToMessage]
   );
 
+  /** Saves a user edit to one inline fenced code block; `null` reverts it. */
+  const updateCodeBlock = useCallback(
+    (convoId: string, msgId: string, key: string, content: string | null) => {
+      appendToMessage(convoId, msgId, (m) => {
+        const next = { ...(m.codeEdits ?? {}) };
+        // A revert deletes the entry rather than storing a copy of the
+        // original, so an untouched message carries no codeEdits at all.
+        if (content === null) delete next[key];
+        else next[key] = content;
+        return { ...m, codeEdits: Object.keys(next).length ? next : undefined };
+      });
+    },
+    [appendToMessage]
+  );
+
   /** Best-effort background memory extraction from a completed exchange. */
   const extractMemory = useCallback(async (convoId: string) => {
     const convo = conversationsRef.current.find((c) => c.id === convoId);
@@ -1243,6 +1258,19 @@ export default function App() {
     [activeId, updateArtifact]
   );
 
+  const onEditCodeBlock = useCallback(
+    (messageId: string, key: string, content: string | null) => {
+      if (!activeId) return;
+      updateCodeBlock(activeId, messageId, key, content);
+    },
+    [activeId, updateCodeBlock]
+  );
+
+  // Reaches MessageBubble (an inline code block offers it when the runtime for
+  // its language isn't installed), so it has to be reference-stable or every
+  // bubble re-renders on each App render.
+  const onOpenPlugins = useCallback(() => navigate("/plugins"), [navigate]);
+
   const onResizeArtifactPanel = useCallback((width: number) => {
     const clamped = Math.min(800, Math.max(320, width));
     setArtifactPanelWidth(clamped);
@@ -1619,8 +1647,9 @@ export default function App() {
       onOpenArtifact={onOpenArtifact}
       onCloseArtifact={onCloseArtifact}
       onEditArtifact={onEditArtifact}
+      onEditCodeBlock={onEditCodeBlock}
       onResizeArtifactPanel={onResizeArtifactPanel}
-      onOpenPlugins={() => navigate("/plugins")}
+      onOpenPlugins={onOpenPlugins}
     />
   );
 

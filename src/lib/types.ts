@@ -243,6 +243,13 @@ export interface ChatMessage {
   media?: GeneratedMedia[];
   /** Generated file artifacts (code/markdown/html/svg/document) produced by this message. */
   files?: GeneratedArtifact[];
+  /**
+   * User edits to the inline fenced code blocks in `content`, keyed by
+   * inlineCodeKey() (see lib/inlineCodeFile.ts). Deliberately not stored as
+   * entries in `files`: anything there is also rendered as an artifact card
+   * under the message, so an edited snippet would appear twice.
+   */
+  codeEdits?: Record<string, string>;
   error?: string;
   /** model id that was requested */
   model?: string;

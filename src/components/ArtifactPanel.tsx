@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   CircleX,
@@ -17,22 +17,13 @@ import {
 } from "lucide-react";
 import type { GeneratedArtifact } from "../lib/types";
 import { downloadBlob, downloadFilename, downloadText } from "../lib/artifactDownload";
-import { isUserEdit } from "../lib/editorSync";
-import { getPluginState, loadPluginStates } from "../lib/pluginStore";
+import { getPluginState, usePluginStates } from "../lib/pluginStore";
 import { getPluginForLanguage } from "../lib/plugins/registry";
+import { CodeEditor } from "./CodeEditor";
 import { CodeRunOutput, type RunLine, type RunStatus } from "./CodeRunOutput";
 import { Markdown } from "./Markdown";
 import { Tooltip } from "./Tooltip";
 import { Tabs } from "./ui";
-
-const MonacoEditor = lazy(() =>
-  Promise.all([import("@monaco-editor/react"), import("monaco-editor")]).then(
-    ([{ Editor, loader }, monaco]) => {
-      loader.config({ monaco });
-      return { default: Editor };
-    }
-  )
-);
 
 function artifactIcon(type: GeneratedArtifact["type"]) {
   if (type === "code") return FileCode2;
@@ -72,58 +63,10 @@ function renderableMarkupKind(artifact: GeneratedArtifact): "html" | "svg" | nul
   return null;
 }
 
-function CodeEditor({
-  language,
-  value,
-  readOnly,
-  onChange,
-}: {
-  language: string;
-  value: string;
-  readOnly: boolean;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex h-full items-center justify-center gap-2 text-fg-faint">
-          <Loader2 size={16} className="animate-spin" /> Loading editor…
-        </div>
-      }
-    >
-      <MonacoEditor
-        height="100%"
-        language={language}
-        value={value}
-        // Monaco reports a programmatic `setValue()` - which is how the `value`
-        // prop is applied - through the same change event as a keystroke. That
-        // echo used to be stored as a local draft, which then took precedence
-        // over the artifact and froze the view mid-generation.
-        onChange={(v) => {
-          const next = v ?? "";
-          if (isUserEdit(next, value, readOnly)) onChange(next);
-        }}
-        theme="vs-dark"
-        options={{ ...monacoOptions, readOnly }}
-      />
-    </Suspense>
-  );
-}
-
 function docFilename(artifact: GeneratedArtifact, ext: "docx" | "pdf"): string {
   const base = artifact.title.replace(/\.[^./\\]+$/, "");
   return `${base || "document"}.${ext}`;
 }
-
-const monacoOptions = {
-  minimap: { enabled: false },
-  fontSize: 13,
-  fontFamily: "'Cascadia Code', 'Fira Code', Consolas, Menlo, monospace",
-  scrollBeyondLastLine: false,
-  wordWrap: "on" as const,
-  automaticLayout: true,
-  padding: { top: 8, bottom: 8 },
-};
 
 export function ArtifactPanel({
   artifact,
@@ -149,17 +92,9 @@ export function ArtifactPanel({
 
   // Re-read on focus: installing a runtime happens on another page, and this
   // used to be read once at mount, so the Run button stayed dead until the
-  // panel remounted.
-  const [pluginStates, setPluginStates] = useState(() => loadPluginStates());
-  useEffect(() => {
-    const refresh = () => setPluginStates(loadPluginStates());
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      window.removeEventListener("focus", refresh);
-      document.removeEventListener("visibilitychange", refresh);
-    };
-  }, []);
+  // panel remounted. The listeners now live in usePluginStates, shared with
+  // every inline code block in the transcript.
+  const pluginStates = usePluginStates();
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [runLines, setRunLines] = useState<RunLine[]>([]);
   const [hasRunOnce, setHasRunOnce] = useState(false);
