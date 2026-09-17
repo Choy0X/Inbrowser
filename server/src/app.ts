@@ -156,22 +156,29 @@ export function buildApp(config: RelayConfig): FastifyInstance {
   app.addHook("onRequest", (request, reply, done) => {
     // A site reachable at both www and non-www serves every page twice under a
     // different URL, which search engines treat as duplicate content and split
-    // ranking signals between the two. inbrowser.tech (config.json's app.domain)
-    // is the canonical, apex form, so any www host is redirected there rather
-    // than the reverse. This runs first and returns without calling done(): a
-    // reply already sent must not fall through to the rest of the hook, or the
-    // redirect response would pick up CORS/isolation headers meant for a page
-    // that was never served. 301, not 302, so a crawler drops the www URL from
-    // its index instead of keeping both alive indefinitely.
-    const host = request.headers.host;
-    if (host?.startsWith("www.")) {
-      const proto = request.headers["x-forwarded-proto"] ?? "https";
-      reply
-        .code(301)
-        .header("Location", `${proto}://${host.slice(4)}${request.raw.url}`)
-        .header("Cache-Control", "public, max-age=3600")
-        .send();
-      return;
+    // ranking signals between the two. config.domain (config.json's app.domain)
+    // is the canonical, apex form, so the www host is redirected there. The
+    // target is always this fixed, configured value - NEVER built from the
+    // request's own Host header, which a client fully controls: reflecting it
+    // back (even with just a "www." prefix stripped) is an open redirect, and
+    // a shared cache keyed on path alone would serve one visitor's forged Host
+    // as another's Location. Matching is exact and case-insensitive, so this
+    // never fires for an unrelated or spoofed host. This runs first and returns
+    // without calling done(): a reply already sent must not fall through to the
+    // rest of the hook, or the redirect response would pick up CORS/isolation
+    // headers meant for a page that was never served. 301, not 302, so a
+    // crawler drops the www URL from its index instead of keeping both alive.
+    if (config.domain) {
+      const host = request.headers.host?.toLowerCase();
+      if (host === `www.${config.domain.toLowerCase()}`) {
+        reply
+          .code(301)
+          .header("Location", `https://${config.domain}${request.raw.url}`)
+          .header("Cache-Control", "public, max-age=3600")
+          .header("Vary", "Host")
+          .send();
+        return;
+      }
     }
 
     // fetch() sends no Content-Type when the body is null, and Fastify answers

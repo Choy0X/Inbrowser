@@ -37,6 +37,12 @@ export interface RelayConfig {
   distDir: string;
   dev: boolean;
   /**
+   * The canonical apex hostname (config.json's `app.domain`, e.g. "inbrowser.tech").
+   * Used only to redirect a `www.` host to this exact value - never to redirect
+   * to whatever a client's Host header happens to say. Empty disables the redirect.
+   */
+  domain: string;
+  /**
    * Opt-in, off by default. When set, `handleRelay` and `openTunnel` emit a
    * single structured JSON line per failure naming which site fired and a
    * non-identifying category/duration - never the target, headers, proxy or
@@ -77,6 +83,23 @@ function readServerSection(): ServerSection {
     // default and the environment can supply the rest. The case that actually
     // matters, an unusable relay secret, is reported at startup by index.ts.
     return {};
+  }
+}
+
+/**
+ * `app.domain` from config.json - a brand string, not a server setting, but the
+ * canonical host the www-redirect pins to has to come from somewhere the server
+ * trusts, and the alternative (duplicating it into the `server` section) would
+ * just invite the two to drift.
+ */
+function readAppDomain(): string {
+  try {
+    const parsed = JSON.parse(readFileSync(join(ROOT, "config.json"), "utf8")) as {
+      app?: { domain?: string };
+    };
+    return parsed.app?.domain ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -128,6 +151,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     rateLimitPerMinute: intFrom(env.RATE_LIMIT_PER_MINUTE, file.rateLimitPerMinute ?? 120),
     distDir: distDir ? resolve(distDir) : join(ROOT, "dist"),
     dev,
+    domain: env.APP_DOMAIN || readAppDomain(),
     debugLog: env.RELAY_DEBUG_LOG === "1",
   };
 }
