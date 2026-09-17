@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.2.0",
+    "date": "2026-09-17",
+    "items": [
+      "Code blocks in chat are now files. Run, edit, download or copy one without leaving the message, with the output right underneath it.",
+      "Edits to a code block are kept with the conversation, so a snippet you fixed is still fixed when you come back to it.",
+      "Python can now import third-party libraries. pandas, numpy, matplotlib and the rest download the first time you run code that needs them, and work offline after that.",
+      "New Packages tab in the Store, once the Python runtime is installed: browse every library this build can install and add them ahead of time.",
+      "Fixed: a failed runtime download was quietly retried, so you waited twice as long before seeing what went wrong."
+    ]
+  },
+  {
     "version": "0.1.0",
     "date": "2026-09-15",
     "items": [
