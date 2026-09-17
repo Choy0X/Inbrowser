@@ -60,15 +60,22 @@ const EXT_KIND: Record<string, AttachmentKind> = {
   mp3: "audio", wav: "audio", m4a: "audio", ogg: "audio", flac: "audio", webm: "audio", aac: "audio", opus: "audio",
 };
 
+/** Guesses an AttachmentKind from a MIME type alone, with no filename/extension
+ *  to go on - the only signal available while something is still being
+ *  dragged (browsers withhold the real File, and its name, until drop). */
+export function kindFromMimeType(mime: string): AttachmentKind | null {
+  const lower = mime.toLowerCase();
+  if (lower.startsWith("image/")) return "image";
+  if (lower.startsWith("audio/")) return "audio";
+  if (lower === "application/pdf" || lower === "application/msword" || lower.includes("wordprocessingml")) return "document";
+  if (lower.startsWith("text/")) return "text";
+  return null;
+}
+
 export function kindFromFile(file: File): AttachmentKind | null {
   const ext = (file.name.split(".").pop() || "").toLowerCase();
   if (EXT_KIND[ext]) return EXT_KIND[ext];
-  const mime = file.type.toLowerCase();
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime === "application/pdf" || mime === "application/msword" || mime.includes("wordprocessingml")) return "document";
-  if (mime.startsWith("text/")) return "text";
-  return null;
+  return kindFromMimeType(file.type);
 }
 
 export function fileToDataUrl(file: File): Promise<string> {

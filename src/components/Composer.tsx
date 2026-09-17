@@ -49,6 +49,7 @@ import {
   dataUrlBytes,
   formatBytes,
   kindFromFile,
+  kindFromMimeType,
   supportedKinds,
 } from "../lib/attachments";
 import { SkillComposerProvider, liveSkillsRegistry } from "./skills/SkillComposerContext";
@@ -149,6 +150,8 @@ function ComposerInner({
   const [readingDoc, setReadingDoc] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [dragInvalid, setDragInvalid] = useState(false);
+  const [dropRejected, setDropRejected] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
@@ -256,25 +259,45 @@ function ComposerInner({
 
   const hasFilesDrag = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
 
+  /** Best-effort "will this drop even work" check using only what's available
+   *  mid-drag - each item's MIME type, never its filename. An item whose MIME
+   *  is empty/unrecognized is left as "unknown" rather than flagged invalid,
+   *  since plenty of legitimate files (many text/code files in particular)
+   *  report no type at all until they're actually dropped. */
+  const dragLooksInvalid = (e: DragEvent): boolean => {
+    const items = e.dataTransfer?.items;
+    if (!items) return false;
+    for (const item of Array.from(items)) {
+      if (item.kind !== "file") continue;
+      const kind = kindFromMimeType(item.type);
+      if (kind && !allowedKinds.includes(kind)) return true;
+    }
+    return false;
+  };
+
   const onComposerDragEnter = (e: DragEvent) => {
     if (!hasFilesDrag(e)) return;
     e.preventDefault();
     dragDepthRef.current += 1;
     setDragActive(true);
+    setDragInvalid(dragLooksInvalid(e));
   };
 
   const onComposerDragOver = (e: DragEvent) => {
     if (!hasFilesDrag(e)) return;
     // Required on dragover (not just drop) or the browser refuses the drop.
     e.preventDefault();
-    e.dataTransfer.dropEffect = "copy";
+    e.dataTransfer.dropEffect = dragInvalid ? "none" : "copy";
   };
 
   const onComposerDragLeave = (e: DragEvent) => {
     if (!hasFilesDrag(e)) return;
     e.preventDefault();
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDragActive(false);
+    if (dragDepthRef.current === 0) {
+      setDragActive(false);
+      setDragInvalid(false);
+    }
   };
 
   const onComposerDrop = (e: DragEvent) => {
@@ -282,8 +305,26 @@ function ComposerInner({
     e.preventDefault();
     dragDepthRef.current = 0;
     setDragActive(false);
+    setDragInvalid(false);
     if (streaming) return;
-    void handleFiles(e.dataTransfer.files);
+
+    // Real File objects (name + extension) are only available now - decisive,
+    // unlike the MIME-only guess above. Anything unsupported never reaches
+    // handleFiles at all: a rejected drop shakes the overlay instead of
+    // quietly turning into an error-flagged attachment chip.
+    const supported: File[] = [];
+    let anyUnsupported = false;
+    for (const file of Array.from(e.dataTransfer.files)) {
+      const kind = kindFromFile(file);
+      if (kind && allowedKinds.includes(kind)) supported.push(file);
+      else anyUnsupported = true;
+    }
+    if (anyUnsupported) setDropRejected(true);
+    if (supported.length > 0) {
+      const dt = new DataTransfer();
+      for (const file of supported) dt.items.add(file);
+      void handleFiles(dt.files);
+    }
   };
 
   /** Read the contents of document file(s) and send them to the LLM in one go. */
@@ -427,11 +468,6 @@ function ComposerInner({
         onDragLeave={onComposerDragLeave}
         onDrop={onComposerDrop}
       >
-        {dragActive && (
-          <div className="pointer-events-none absolute inset-0 z-20 m-2 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-accent/10 text-sm font-medium text-accent">
-            Drop to attach
-          </div>
-        )}
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
             {attachments.map((att) => {
@@ -471,6 +507,18 @@ function ComposerInner({
         )}
 
         <div data-ui="composer" className="relative border border-border bg-canvas shadow-soft transition-shadow focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
+          {(dragActive || dropRejected) && (
+            <div
+              onAnimationEnd={() => setDropRejected(false)}
+              className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed text-sm font-medium ${
+                dragInvalid || dropRejected
+                  ? "border-error bg-error/10 text-error"
+                  : "border-accent bg-accent/10 text-accent"
+              } ${dropRejected ? "animate-shake" : ""}`}
+            >
+              Drop to attach
+            </div>
+          )}
           <PlainTextPlugin
             contentEditable={
               <ContentEditable

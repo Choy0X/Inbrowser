@@ -625,6 +625,18 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
         consecutiveRelayFailureCode = null;
       }
       if (consecutiveRelayFailureCount >= RELAY_SHORT_CIRCUIT_THRESHOLD) {
+        // Several proxies (or retries of the same one) all failing with the
+        // identical relay-level code means the shared relay hop itself is
+        // the problem, not any specific downstream proxy — rotating to yet
+        // another one can't help. A connection with real CORS support can
+        // skip the relay entirely, which is the one thing actually likely to
+        // succeed, so try that once before giving up outright.
+        if (attempt < maxAttempts - 1 && !triedDirect && activeProxy &&
+          !providerPresetForUrl(currentTarget.connection.baseUrl)?.requiresProxy) {
+          triedDirect = true;
+          activeProxy = null;
+          continue;
+        }
         options.onError?.(
           `Your configured proxy/relay failed ${consecutiveRelayFailureCount} times in a row across ` +
           `different providers (last error: "${message}") — check your proxy/relay settings in Settings → Proxies.\n\n` +

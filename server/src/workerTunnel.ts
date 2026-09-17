@@ -200,6 +200,23 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
   });
 }
 
+/**
+ * A single `write()` here becomes a single `ws.send()`, and the tunnel is a
+ * raw byte stream with no per-message framing beyond the initial dial frame
+ * - the Worker on the other end just forwards whatever bytes arrive onto the
+ * TCP socket, in order. That makes chunking here fully transparent to it,
+ * which matters because a large request body (an image attachment's base64
+ * payload, easily hundreds of KB) can arrive from Fastify's own incoming
+ * stream as far fewer, far larger reads than a small text turn ever does -
+ * especially once Cloudflare's edge sits in front of this server and
+ * rebatches the client's upload before handing it to the origin. A single
+ * oversized WebSocket message is exactly the kind of thing a Workers-hosted
+ * relay has no good option but to drop the connection over, which surfaces
+ * to the browser as the tunnel closing mid-request - only for requests large
+ * enough to hit it, which a plain text message never is.
+ */
+const MAX_WS_CHUNK_BYTES = 512 * 1024;
+
 function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: string): Duplex {
   const duplex = new Duplex({
     // Data is pushed as it arrives rather than pulled. There is no usable
@@ -208,7 +225,13 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
     read() {},
     write(chunk: Buffer, _encoding, callback) {
       try {
-        ws.send(chunk);
+        if (chunk.length <= MAX_WS_CHUNK_BYTES) {
+          ws.send(chunk);
+        } else {
+          for (let offset = 0; offset < chunk.length; offset += MAX_WS_CHUNK_BYTES) {
+            ws.send(chunk.subarray(offset, offset + MAX_WS_CHUNK_BYTES));
+          }
+        }
         callback();
       } catch (err) {
         callback(err as Error);

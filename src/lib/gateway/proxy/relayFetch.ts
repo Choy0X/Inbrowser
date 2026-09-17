@@ -112,9 +112,24 @@ export async function relayFetch(
 
   // A deployment serving only the static bundle - a CDN, a fork - has no
   // /v1/fetch, and a static host answers an unknown path with the SPA shell
-  // rather than a 404. Without this the HTML is handed back as if it were the
-  // provider's reply and surfaces as nonsense several layers later.
+  // (a 200) rather than a 404. Without this the HTML is handed back as if it
+  // were the provider's reply and surfaces as nonsense several layers later.
+  //
+  // A non-2xx status alongside an HTML body is a different thing entirely: a
+  // deployment that DOES have a relay never returns HTML from its own code
+  // (server/src/app.ts is JSON-only), so a 5xx HTML page here can only be
+  // something in front of the origin - Cloudflare's own edge, or a reverse
+  // proxy - answering because it couldn't reach it. That's a transient
+  // outage, not "never configured", and telling a user whose relay is real
+  // to go set one up in Settings is actively wrong advice.
   if ((response.headers.get("content-type") ?? "").includes("text/html")) {
+    if (response.status >= 500) {
+      throw new GatewayError(
+        response.status,
+        `The relay is temporarily unreachable (its host returned an HTML error page, HTTP ${response.status}) - this is usually a brief outage; retrying may help.`,
+        false, undefined, "provider_gateway_error"
+      );
+    }
     throw new GatewayError(
       502,
       "This deployment has no proxy relay. Set a relay URL in Settings, or host the app with its server.",
