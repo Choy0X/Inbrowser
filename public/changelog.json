@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.4.0",
+    "date": "2026-09-17",
+    "items": [
+      "Generate image, Edit image and Generate video now grey themselves out when none of your configured models can actually do the job, instead of opening a panel with nothing behind it.",
+      "Drag a file straight onto the composer to attach it - the paperclip menu still works too.",
+      "Fixed: \"auto\" claimed it could see images, watch video, reason, and call tools even with nothing configured for any of that - it now only claims what your actual models support.",
+      "Fixed: one unhealthy proxy or relay used to burn through all 12 model attempts on a single image question, each failing the exact same way; it now retries once, then tells you plainly to check your proxy settings instead of listing a wall of near-identical errors.",
+      "Large screenshots are compressed harder before upload (while keeping real transparency intact), to cut down on failures with providers or proxies that cap request size."
+    ]
+  },
+  {
     "version": "0.3.0",
     "date": "2026-09-17",
     "items": [
