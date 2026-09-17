@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.4.1",
+    "date": "2026-09-18",
+    "items": [
+      "Fixed: the \"Drop to attach\" overlay didn't line up with the composer - it now traces the message box exactly.",
+      "Dragging an unsupported file over the composer turns the drop zone red, and dropping it anyway shakes the box and refuses the attach instead of silently adding a failed one.",
+      "Fixed: attaching an image and asking about it always failed once a proxy was configured - a large upload was tripping a size limit on the relay tunnel that a normal text message never came close to.",
+      "Fixed: a \"this deployment has no proxy relay\" error could appear even on a deployment that has one, when its server was just briefly unreachable."
+    ]
+  },
+  {
     "version": "0.4.0",
     "date": "2026-09-17",
     "items": [
