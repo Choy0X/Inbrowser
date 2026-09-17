@@ -1,0 +1,314 @@
+import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import * as mammoth from "mammoth";
+import type { Attachment, AttachmentKind } from "./types";
+import type { ModelCapabilities } from "./capabilities";
+import { transcribeAudioFile } from "./onniroute";
+import { newId } from "./store";
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+export const FILE_KIND_META: Record<
+  AttachmentKind,
+  { label: string; accept: string; hint: string }
+> = {
+  image: {
+    label: "Images",
+    accept: "image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml",
+    hint: "png, jpg, webp, gif, bmp, svg",
+  },
+  document: {
+    label: "Document",
+    accept: ".pdf,.doc,.docx,.rtf,.odt,.txt,.md,.markdown,.csv,.json,.html,.htm,.xml,.yaml,.yml,.log,.diff,.patch",
+    hint: "pdf, doc, docx, rtf, odt, text & more",
+  },
+  text: {
+    label: "Text file",
+    accept: ".txt,.md,.markdown,.csv,.json,.js,.jsx,.ts,.tsx,.py,.html,.htm,.xml,.yaml,.yml,.css,.scss,.less,.sh,.bat,.ps1,.sql,.java,.c,.cpp,.h,.hpp,.rb,.go,.rs,.php,.swift,.kt,.toml,.ini,.cfg,.conf,.log,.diff,.patch,.env,.gitignore",
+    hint: "plain text & source code",
+  },
+  audio: {
+    label: "Audio",
+    accept: "audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/flac,audio/webm,audio/aac,.mp3,.wav,.m4a,.ogg,.flac,.webm,.aac,.opus",
+    hint: "transcribed to text first",
+  },
+};
+
+export const FILE_KIND_ORDER: AttachmentKind[] = ["image", "document", "text", "audio"];
+
+/** Which file kinds a model's capabilities allow. */
+export function supportedKinds(caps: ModelCapabilities): AttachmentKind[] {
+  const kinds: AttachmentKind[] = ["text", "document"];
+  if (caps.vision) kinds.push("image");
+  kinds.push("audio"); // audio is transcribed to text, model-agnostic
+  return kinds;
+}
+
+const EXT_KIND: Record<string, AttachmentKind> = {
+  png: "image", jpg: "image", jpeg: "image", webp: "image", gif: "image", bmp: "image", svg: "image",
+  pdf: "document",
+  docx: "document",
+  doc: "document",
+  rtf: "document",
+  odt: "document",
+  txt: "text", md: "text", markdown: "text", csv: "text", json: "text", js: "text", jsx: "text",
+  ts: "text", tsx: "text", py: "text", html: "text", htm: "text", xml: "text", yaml: "text", yml: "text",
+  css: "text", scss: "text", less: "text", sh: "text", bat: "text", ps1: "text", sql: "text",
+  java: "text", c: "text", cpp: "text", h: "text", hpp: "text", rb: "text", go: "text", rs: "text",
+  php: "text", swift: "text", kt: "text", toml: "text", ini: "text", cfg: "text", conf: "text",
+  log: "text", diff: "text", patch: "text", env: "text", gitignore: "text",
+  mp3: "audio", wav: "audio", m4a: "audio", ogg: "audio", flac: "audio", webm: "audio", aac: "audio", opus: "audio",
+};
+
+export function kindFromFile(file: File): AttachmentKind | null {
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  if (EXT_KIND[ext]) return EXT_KIND[ext];
+  const mime = file.type.toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime === "application/pdf" || mime === "application/msword" || mime.includes("wordprocessingml")) return "document";
+  if (mime.startsWith("text/")) return "text";
+  return null;
+}
+
+export function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Providers cap image longest-edge around 2000-2600px and silently
+ *  downscale beyond that (e.g. Claude ~2576px) — so resizing before
+ *  base64-encoding saves upload bytes and completion-context tokens with
+ *  no visible quality loss. */
+const MAX_IMAGE_EDGE = 2048;
+const IMAGE_JPEG_QUALITY = 0.85;
+
+/** Resize an image data URL to MAX_IMAGE_EDGE on its longest side; a no-op
+ *  if it's already small. Fails open (returns the original) on any error,
+ *  since a slightly larger upload is far better than a dropped image. */
+export function downscaleImageDataUrl(dataUrl: string): Promise<string> {
+  if (dataUrl.startsWith("data:image/svg")) return Promise.resolve(dataUrl); // vector — no benefit
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const { width, height } = img;
+      const longest = Math.max(width, height);
+      if (!longest || longest <= MAX_IMAGE_EDGE) {
+        resolve(dataUrl);
+        return;
+      }
+      const scale = MAX_IMAGE_EDGE / longest;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(width * scale);
+      canvas.height = Math.round(height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const keepPng = dataUrl.startsWith("data:image/png") || dataUrl.startsWith("data:image/gif");
+      resolve(keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY));
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+export interface PdfResult {
+  text: string;
+  pages: string[];
+}
+
+/** Extract PDF text; if the PDF has no text layer, rasterize pages to images. */
+export async function extractPdf(file: File, maxPages = 8): Promise<PdfResult> {
+  const data = await file.arrayBuffer();
+  const doc = await getDocument({ data }).promise;
+  const pageCount = Math.min(doc.numPages, maxPages);
+  let text = "";
+  for (let i = 1; i <= pageCount; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items
+      .map((item) => (typeof (item as { str?: unknown }).str === "string" ? (item as { str: string }).str : ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    text += pageText ? pageText + "\n\n" : "";
+  }
+
+  const meaningful = text.replace(/\s+/g, " ").trim();
+  if (meaningful.length >= 80) {
+    return { text: meaningful, pages: [] };
+  }
+
+  // Scanned PDF — render pages as JPEG images for vision models.
+  const pages: string[] = [];
+  for (let i = 1; i <= Math.min(doc.numPages, maxPages); i++) {
+    const page = await doc.getPage(i);
+    const viewport = page.getViewport({ scale: 1.6 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    pages.push(canvas.toDataURL("image/jpeg", 0.85));
+  }
+  return { text: "", pages };
+}
+
+export interface DocResult {
+  text: string;
+  images: string[];
+}
+
+/** Detect whether an ArrayBuffer is a zip-based OOXML (.docx/.xlsx). */
+function isZip(bytes: Uint8Array): boolean {
+  return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/** Detect the legacy Microsoft OLE compound file signature (.doc). */
+function isOle(bytes: Uint8Array): boolean {
+  return bytes.length > 8 && bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
+}
+
+/**
+ * Best-effort text extraction from a legacy binary Word (.doc) file. Word 2003
+ * stores text runs in UTF-16LE in the WordDocument stream; we scan the whole
+ * buffer for runs of printable characters (covers the common case reasonably,
+ * and is far more reliable than feeding a binary blob to mammoth). Falls back
+ * to mammoth's own attempt, then returns a clear message if nothing was found.
+ */
+export async function extractDoc(file: File): Promise<DocResult> {
+  const arrayBuffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+
+  // .docx is a zip — route it to the docx extractor.
+  if (isZip(bytes)) return extractDocx(file);
+
+  if (isOle(bytes)) {
+    // Word 97-2003 text runs are UTF-16LE; extract printable runs.
+    const chunks: string[] = [];
+    const dv = new DataView(arrayBuffer);
+    let run = "";
+    const flush = () => {
+      if (run.replace(/[\x00-\x1f\x7f]/g, "").trim().length >= 4) chunks.push(run.trim());
+      run = "";
+    };
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+      let code = dv.getUint16(i, true);
+      // Skip the non-text stream garbage; keep printable-ish code points.
+      if (code === 0 || code === 0x0a || code === 0x0d) {
+        flush();
+        if (code === 0x0d) chunks.push("\n");
+      } else if ((code >= 0x20 && code <= 0x7e) || code >= 0xa0) {
+        run += String.fromCharCode(code);
+      } else {
+        flush();
+      }
+      if (run.length > 4096) flush();
+    }
+    flush();
+    const text = (chunks.join("\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n")).trim();
+    if (text.length >= 40) return { text, images: [] };
+  }
+
+  // Fallback: let mammoth try (it can occasionally parse simple .doc files).
+  try {
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    const text = (result.value || "").trim();
+    if (text) return { text, images: [] };
+  } catch {
+    /* ignore — fall through to error */
+  }
+  throw new Error(
+    "This appears to be a legacy binary .doc file that couldn't be read in the browser. " +
+    "Save it as .docx (or a PDF) and try again."
+  );
+}
+
+/** Extract text AND embedded images from a .docx (OOXML zip) via mammoth. */
+export async function extractDocx(file: File): Promise<DocResult> {
+  const arrayBuffer = await file.arrayBuffer();
+  const text = await mammoth.extractRawText({ arrayBuffer }).then((r) => r.value || "");
+
+  const images: string[] = [];
+  // mammoth embeds embedded images as base64 data URLs directly in the HTML it
+  // produces, so we can pull every picture out without a zip dependency.
+  try {
+    const html = await mammoth.convertToHtml({ arrayBuffer });
+    const srcs = html.value.match(/src="(data:image\/[^"]+)"/g) || [];
+    for (const token of srcs) {
+      const url = token.slice(5, -1);
+      if (url) images.push(url);
+    }
+  } catch {
+    /* embedded-image extraction is best-effort */
+  }
+  return { text: text.trim(), images };
+}
+
+/** Convert a dropped/selected File into a ready-to-attach Attachment. */
+export async function buildAttachment(file: File): Promise<Attachment> {
+  const base: Attachment = {
+    id: newId(),
+    kind: "text",
+    name: file.name,
+    size: file.size,
+  };
+  const kind = kindFromFile(file);
+  if (!kind) {
+    return { ...base, error: `Unsupported file type (${file.type || "unknown"})` };
+  }
+  base.kind = kind;
+
+  if (kind === "image") {
+    base.dataUrl = await downscaleImageDataUrl(await fileToDataUrl(file));
+  } else if (kind === "document") {
+    const { text, images, pages } = await extractDocument(file);
+    base.text = text;
+    base.images = images;
+    base.pages = pages;
+  } else if (kind === "audio") {
+    base.transcript = await transcribeAudioFile(file, file.name);
+  } else {
+    base.text = await file.text();
+  }
+  return base;
+}
+
+/** Detect the kind of document (pdf / docx / doc) a file represents. */
+function isPdf(file: File): boolean {
+  const mime = file.type.toLowerCase();
+  if (mime === "application/pdf") return true;
+  return (file.name.split(".").pop() || "").toLowerCase() === "pdf";
+}
+
+/** Extract text/images from any supported document (PDF, .docx, legacy .doc). */
+export async function extractDocument(file: File): Promise<DocResult & { pages: string[] }> {
+  if (isPdf(file)) {
+    const result = await extractPdf(file);
+    return { text: result.text, images: [], pages: result.pages };
+  }
+  // Word documents (.docx and legacy .doc; extractDoc routes by magic bytes).
+  const result = await extractDoc(file);
+  return { text: result.text, images: result.images, pages: [] };
+}
+
+/** Approximate byte size of a base64 data URL payload. */
+export function dataUrlBytes(dataUrl: string): number {
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1) return 0;
+  return Math.floor(((dataUrl.length - comma - 1) * 3) / 4);
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

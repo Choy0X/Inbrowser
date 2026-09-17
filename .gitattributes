@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings. Checked out with CRLF on a Linux host,
+# install.sh fails at the shebang with "bad interpreter: /bin/bash^M", which is
+# an unhelpful way to discover a line-ending problem.
+*.sh text eol=lf
+
+# Same reasoning for anything else that a Linux host executes or parses strictly.
+Caddyfile text eol=lf
+*.service text eol=lf

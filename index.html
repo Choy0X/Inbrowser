@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- Everything between the seo:head markers is REPLACED per route, at dev
+         request time and at build time, by seoHtmlPlugin in vite.config.ts -
+         title, description, canonical, robots, Open Graph, Twitter card and
+         JSON-LD. Do not hand-edit it: edit src/lib/seo/routeTable.ts, which is
+         the one source all of them come from. The two lines below are only a
+         fallback so this file still describes itself when read directly; the
+         __APP_*__ tokens in them are filled by htmlBrandPlugin. -->
+    <!--seo:head-->
+    <title>__APP_TITLE__</title>
+    <meta name="description" content="__APP_DESCRIPTION__" />
+    <!--/seo:head-->
+
+    <script>
+      // Apply the saved mode before first paint. Without this, every load
+      // flashes light before the chosen mode arrives with React.
+      (function () {
+        var mode = "light";
+        try {
+          var ui = JSON.parse(localStorage.getItem("fachoy:ui:v1") || "{}");
+          var theme = ui.theme === "light" || ui.theme === "dark" ? ui.theme : "system";
+          var prefersDark =
+            theme === "dark" ||
+            (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (prefersDark) mode = "dark";
+          // Read here rather than from a second script: the boot overlay below
+          // draws a 256px sidebar, and a visitor who collapsed theirs would
+          // otherwise watch it disappear the moment React mounts.
+          if (ui.sidebarCollapsed) document.documentElement.dataset.rail = "collapsed";
+        } catch (e) {
+          /* fall through to the default above */
+        }
+        document.documentElement.dataset.theme = mode;
+        document.documentElement.style.colorScheme = mode;
+      })();
+    </script>
+
+    <style>
+      /* The boot overlay: an app-shell skeleton, plus a download bar on a first
+         visit. It covers the SEO shell below rather than hiding it, so the
+         shell stays readable to anything that parses HTML.
+
+         Deliberately not Tailwind. In dev the app stylesheet arrives with the
+         JS module graph (main.tsx imports it), so a class here would be
+         unstyled for exactly the window this exists to cover. The token
+         literals are var() FALLBACKS only - once src/styles.css loads,
+         --canvas and friends win and this matches the app exactly. They must
+         stay equal to :root and [data-theme="dark"] in src/styles.css. */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        background: rgb(var(--canvas, 255 255 255));
+      }
+      [data-theme="dark"] #boot {
+        background: rgb(var(--canvas, 1 1 32));
+      }
+
+      /* Mirrors Sidebar.tsx: hidden below md (768px), --rail-w wide above it. */
+      #boot-rail {
+        display: none;
+        flex: none;
+        width: var(--rail-w, 256px);
+        border-right: 1px solid rgb(var(--border, 235 235 235));
+        background: rgb(var(--bg-elevated, 255 255 255));
+      }
+      [data-theme="dark"] #boot-rail {
+        border-right-color: rgb(var(--border, 38 38 58));
+        background: rgb(var(--bg-elevated, 1 1 32));
+      }
+      @media (min-width: 768px) {
+        #boot-rail {
+          display: block;
+        }
+      }
+      [data-rail="collapsed"] #boot-rail {
+        display: none;
+      }
+
+      #boot-main {
+        display: flex;
+        min-width: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+      }
+      /* Where ChatHeader sits, and where PageShell's top padding starts. */
+      #boot-bar {
+        flex: none;
+        height: 56px;
+      }
+      /* PageShell: mx-auto w-full max-w-3xl, px-4 pt-5 / sm:px-6 sm:pt-6. */
+      #boot-col {
+        width: 100%;
+        max-width: 48rem;
+        margin: 0 auto;
+        padding: 20px 16px 0;
+      }
+      @media (min-width: 640px) {
+        #boot-col {
+          padding: 24px 24px 0;
+        }
+      }
+
+      .boot-line,
+      .boot-block {
+        background: rgb(var(--bg-subtle, 235 235 235));
+        /* NOT named `pulse`: Tailwind ships its own @keyframes pulse and its
+           stylesheet loads after this block. */
+        animation: boot-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
+      [data-theme="dark"] .boot-line,
+      [data-theme="dark"] .boot-block {
+        background: rgb(var(--bg-subtle, 14 14 34));
+      }
+      .boot-title {
+        height: 28px;
+        width: 40%;
+      }
+      .boot-sub {
+        height: 12px;
+        width: 60%;
+        margin-top: 10px;
+      }
+      .boot-block {
+        height: 80px;
+        margin-top: 12px;
+        border: 1px solid rgb(var(--border-subtle, 242 242 242));
+      }
+      [data-theme="dark"] .boot-block {
+        border-color: rgb(var(--border-subtle, 26 26 45));
+      }
+      .boot-block:first-of-type {
+        margin-top: 24px;
+      }
+
+      @keyframes boot-pulse {
+        50% {
+          opacity: 0.5;
+        }
+      }
+
+      /* Download progress. Same grammar as the Progress primitive in
+         ui/Surface.tsx: a 6px pill track, an accent fill, a tabular readout. */
+      #boot-dl {
+        width: 100%;
+        max-width: 48rem;
+        margin: auto auto 0;
+        padding: 0 16px 24px;
+      }
+      #boot-dl[hidden] {
+        display: none;
+      }
+      @media (min-width: 640px) {
+        #boot-dl {
+          padding: 0 24px 24px;
+        }
+      }
+      #boot-dl-label {
+        margin: 0 0 8px;
+        font: 500 12px/16px ui-sans-serif, system-ui, -apple-system, sans-serif;
+        color: rgb(var(--fg-faint, 140 140 140));
+      }
+      #boot-dl-track {
+        height: 6px;
+        width: 100%;
+        overflow: hidden;
+        border-radius: 9999px;
+        background: rgb(var(--bg-subtle, 235 235 235));
+      }
+      #boot-dl-fill {
+        height: 100%;
+        width: 0;
+        border-radius: 9999px;
+        background: rgb(var(--accent, 91 87 214));
+        transition: width 200ms ease-out;
+      }
+      #boot-dl-bytes {
+        margin: 6px 0 0;
+        font: 400 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-variant-numeric: tabular-nums;
+        color: rgb(var(--fg-faint, 140 140 140));
+      }
+      [data-theme="dark"] #boot-dl-label,
+      [data-theme="dark"] #boot-dl-bytes {
+        color: rgb(var(--fg-faint, 120 121 133));
+      }
+      [data-theme="dark"] #boot-dl-track {
+        background: rgb(var(--bg-subtle, 14 14 34));
+      }
+      [data-theme="dark"] #boot-dl-fill {
+        background: rgb(var(--accent, 165 163 240));
+      }
+
+      /* styles.css has a global reduced-motion block, but it only takes effect
+         once that stylesheet loads - which is after the window this covers. */
+      @media (prefers-reduced-motion: reduce) {
+        .boot-line,
+        .boot-block {
+          animation: none;
+        }
+        #boot-dl-fill {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The markup between the seo:body markers is what a crawler, an AI fetcher,
+         a link-preview bot and a no-JS visitor read. React's createRoot clears
+         this container on its first render, so it never reaches a normal
+         visitor's screen for more than a moment. It is generated per route from
+         the same data the React views display - see src/lib/seo/renderShell.ts. -->
+    <div id="root" data-seo-path="/">
+      <!--seo:body--><!--/seo:body-->
+      <!-- The boot overlay. INSIDE #root but OUTSIDE the seo:body markers on
+           purpose: injectSeo only replaces what is between the markers (and
+           rewrites this div's opening tag), so this survives untouched and
+           every per-route shell inherits it, since the build derives all nine
+           of them from dist/index.html. Being inside #root is also what removes
+           it - createRoot empties the container on React's first commit, so
+           there is no cleanup code and no race. It comes after the shell so the
+           shell's h1 stays first in DOM order.
+
+           The skeleton parts are aria-hidden, matching RouteFallback. The
+           progress region is not: it is a real progressbar, and a screen reader
+           still has the shell text underneath either way. -->
+      <div id="boot">
+        <div id="boot-rail" aria-hidden="true"></div>
+        <div id="boot-main">
+          <div id="boot-bar" aria-hidden="true"></div>
+          <div id="boot-col" aria-hidden="true">
+            <div class="boot-line boot-title"></div>
+            <div class="boot-line boot-sub"></div>
+            <div class="boot-block"></div>
+            <div class="boot-block"></div>
+            <div class="boot-block"></div>
+          </div>
+          <div id="boot-dl" hidden>
+            <p id="boot-dl-label">Downloading __APP_NAME__</p>
+            <div
+              id="boot-dl-track"
+              role="progressbar"
+              aria-label="Downloading __APP_NAME__"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <div id="boot-dl-fill"></div>
+            </div>
+            <p id="boot-dl-bytes"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var root = document.getElementById("root");
+        if (!root) return;
+
+        // A service worker answers every navigation with the precached home
+        // shell (Workbox supports exactly one navigateFallback), so a returning
+        // visitor opening /library can be handed the homepage's static content.
+        // Crawlers never have a service worker and never see this, but a human
+        // would.
+        var shell = root.dataset.seoPath || "/";
+        var here = location.pathname;
+        // `/chat` is the shell for every `/chat/<id>`, so a prefix counts.
+        var matches = here === shell || (shell !== "/" && here.indexOf(shell + "/") === 0);
+        if (!matches) {
+          // Drop the wrong route's shell and nothing else. Blanking the whole
+          // container also destroyed the boot overlay below it, which left a
+          // blank screen until React mounted; removing just the shell keeps the
+          // skeleton up for the wait.
+          var stale = root.querySelector("[data-seo-shell]");
+          if (stale) stale.remove();
+        }
+
+        var boot = document.getElementById("boot");
+        if (!boot) return;
+
+        // If the bundle never loads, uncover the static shell rather than
+        // leaving an opaque overlay sitting over readable text forever. A no-op
+        // once React has committed, since #root is already empty by then.
+        setTimeout(function () {
+          boot.remove();
+        }, 15000);
+
+        // __BOOT_BYTES__ is substituted by withBootBytes() in vite.config.ts
+        // with the uncompressed size of everything this document pulls before
+        // it can render. In dev it is never substituted, Number() gives NaN,
+        // and the overlay stays a plain skeleton - which is right, because dev
+        // serves hundreds of unbundled modules and a byte total would be
+        // meaningless.
+        var total = Number("__BOOT_BYTES__");
+        var dl = document.getElementById("boot-dl");
+        if (!dl || !total || !window.PerformanceObserver) return;
+
+        var fill = document.getElementById("boot-dl-fill");
+        var track = document.getElementById("boot-dl-track");
+        var bytes = document.getElementById("boot-dl-bytes");
+        var loaded = 0;
+        var seen = {};
+        var mb = function (n) {
+          return (n / 1048576).toFixed(1);
+        };
+
+        var observer = new PerformanceObserver(function (list) {
+          // #root is emptied on React's first commit, taking this with it.
+          // Stop rather than paint into a detached node.
+          if (!dl.isConnected) {
+            observer.disconnect();
+            return;
+          }
+          var entries = list.getEntries();
+          for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            if (seen[entry.name] || entry.name.indexOf("/assets/") === -1) continue;
+            seen[entry.name] = 1;
+            // decodedBodySize, not transferSize: the denominator is
+            // uncompressed on-disk bytes, Cloudflare compresses in transit, and
+            // transferSize is 0 on a warm cache hit.
+            loaded += entry.decodedBodySize || entry.transferSize || 0;
+          }
+          // Lazy chunks this document never referenced still land in /assets/,
+          // so the numerator can overshoot. Clamp both, or a first-time visitor
+          // reads "4.1 / 3.4 MB".
+          var done = Math.min(loaded, total);
+          var pct = Math.round((done / total) * 100);
+          fill.style.width = pct + "%";
+          track.setAttribute("aria-valuenow", String(pct));
+          bytes.textContent = mb(done) + " / " + mb(total) + " MB";
+          dl.hidden = false;
+        });
+        observer.observe({ type: "resource", buffered: true });
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
