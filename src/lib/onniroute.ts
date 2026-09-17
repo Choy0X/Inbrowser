@@ -350,6 +350,7 @@ interface AttemptFailure {
   modelId: string;
   message: string;
   status?: number;
+  code?: string;
 }
 
 /** "[OpenCode Free] oc/ling-3.0-flash-fin-free — HTTP 503: Endpoint is unavailable." —
@@ -457,6 +458,20 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
   let target: ResolvedTarget | null = null;
   let activeProxy: CustomProxy | null = null;
   let protocolRepairAttempted = false;
+  // A relay/proxy-transport failure (e.g. the tunnel closing mid-request) is
+  // inherently transient — the identical target often succeeds on a bare
+  // retry, since nothing about the request itself was wrong. Bounded to one
+  // extra attempt per (connection, model, proxy) so it can't by itself
+  // consume the budget connection-diversity/proxy-rotation rely on.
+  const sameTargetRetries = new Map<string, number>();
+  // Tracks a run of consecutive attempts that all failed with the same
+  // relay/proxy-level failure code, possibly across different providers —
+  // that pattern means the shared relay/proxy hop itself is unhealthy, not
+  // any individual model, and rotating through the rest of the attempt
+  // budget cannot fix it.
+  let consecutiveRelayFailureCode: string | null = null;
+  let consecutiveRelayFailureCount = 0;
+  const RELAY_SHORT_CIRCUIT_THRESHOLD = 3;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (!target) {
@@ -591,7 +606,33 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
         recordProxyOutcome(activeProxy.id, false, latencyMs, { hardFailure: true,
           targetUrl: currentTarget.connection.baseUrl, targetOnly: failure.targetOnly });
       }
-      attempts.push({ connection: currentTarget.connection, modelId: currentTarget.modelId, message, status });
+      const failureCode = err instanceof GatewayError ? err.code : undefined;
+      attempts.push({ connection: currentTarget.connection, modelId: currentTarget.modelId, message, status, code: failureCode });
+
+      // A relay/proxy failure code repeating across consecutive attempts —
+      // possibly across entirely different providers — means the shared
+      // relay/proxy hop itself is unhealthy, not any individual model.
+      // Continuing to rotate models cannot fix that, and it only buries the
+      // real cause under a wall of near-identical bullet points. Only counts
+      // failures actually attributed to the proxy/relay layer, so a run of
+      // ordinary per-model 4xx/429s never trips this.
+      if (failure.proxyFailure && failureCode) {
+        consecutiveRelayFailureCount =
+          failureCode === consecutiveRelayFailureCode ? consecutiveRelayFailureCount + 1 : 1;
+        consecutiveRelayFailureCode = failureCode;
+      } else {
+        consecutiveRelayFailureCount = 0;
+        consecutiveRelayFailureCode = null;
+      }
+      if (consecutiveRelayFailureCount >= RELAY_SHORT_CIRCUIT_THRESHOLD) {
+        options.onError?.(
+          `Your configured proxy/relay failed ${consecutiveRelayFailureCount} times in a row across ` +
+          `different providers (last error: "${message}") — check your proxy/relay settings in Settings → Proxies.\n\n` +
+          summarizeFailures(attempts, "Request failed.")
+        );
+        return { resolvedModel: null, resolvedProvider: null, toolCalls: [] };
+      }
+
       // One bounded correction can recover a formatting failure. Never replay
       // after visible output or execute any part of a rejected tool batch.
       if (!streamedAny && !protocolRepairAttempted && attempt < maxAttempts - 1 &&
@@ -600,6 +641,19 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
         options = { ...options, messages: [...options.messages, { role: "system",
           content: "Your previous response could not be used. Answer the latest user request directly. Use only the supplied tools through native function calls with valid JSON object arguments. If no tool is supplied, answer in plain text. Do not emit internal tool markup or invent extra tasks." }] };
         continue;
+      }
+      // A relay/proxy-transport-level failure is inherently transient (a
+      // dropped tunnel, a momentary block) — retry the identical target once
+      // before paying the cost of rotating to a worse-fit candidate. Never
+      // retries a model-specific/hard failure, which a retry cannot fix.
+      if (attempt < maxAttempts - 1 && !streamedAny && !failure.stop &&
+        (failure.proxyFailure || failure.connectionFailure) && !hardFailure) {
+        const retryKey = `${currentTarget.connection.id}:${currentTarget.modelId}:${activeProxy?.id ?? "direct"}`;
+        const priorRetries = sameTargetRetries.get(retryKey) ?? 0;
+        if (priorRetries < 1) {
+          sameTargetRetries.set(retryKey, priorRetries + 1);
+          continue; // target/activeProxy are unchanged — retries the identical attempt
+        }
       }
       if (attempt < maxAttempts - 1 && !streamedAny && !failure.stop) {
         // Retry another proxy only when the failure belongs to the route.

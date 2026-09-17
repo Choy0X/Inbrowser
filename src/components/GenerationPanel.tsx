@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import type { OmniModel } from "../lib/types";
 import type { CapabilityIndex } from "../lib/capabilities";
-import { modelCapabilities, providerLabel } from "../lib/capabilities";
+import { mediaModelScore, modelCapabilities, providerLabel } from "../lib/capabilities";
 
 export type GenerationMode = "image" | "edit" | "video";
 
@@ -80,15 +80,7 @@ export function GenerationPanel({
   const usable = useMemo(() => {
     const scored: { model: OmniModel; score: number }[] = [];
     for (const m of models) {
-      const caps = modelCapabilities(m.id, index);
-      let score = 0;
-      if (mode === "video") {
-        if (caps.video) score = 2;
-        else if (/video|veo|kling|runway|sora|pixverse|wan/i.test(m.id)) score = 1;
-      } else {
-        if (caps.vision) score = 2;
-        else if (/image|dall|flux|midjourney|stable|imagen|sdxl|sana|qwen-image|graphic|illustration/i.test(m.id)) score = 1;
-      }
+      const score = mediaModelScore(m.id, modelCapabilities(m.id, index), mode === "video" ? "video" : "image");
       if (score > 0) scored.push({ model: m, score });
     }
     scored.sort((a, b) => b.score - a.score || a.model.id.localeCompare(b.model.id));

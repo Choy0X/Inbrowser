@@ -1,4 +1,4 @@
-import type { ProviderConnection, ProviderPluginManifest, ProviderPluginModel } from "./types";
+import type { OmniModel, ProviderConnection, ProviderPluginManifest, ProviderPluginModel } from "./types";
 import { selectUsableModels } from "./gateway/routingEngine";
 import { isSmallModel } from "./modelSize";
 
@@ -192,13 +192,40 @@ function splitModelId(fullId: string): { prefix: string; rest: string } {
   return { prefix: fullId.slice(0, slash), rest: fullId.slice(slash + 1) };
 }
 
+/**
+ * True if any model actually in `index` reports the given capability. Used to
+ * ground the virtual "auto" router's own capabilities in reality instead of
+ * claiming everything — otherwise a user with zero vision-capable models
+ * configured still sees vision/video/reasoning/tools all "supported" the
+ * moment they're on "auto", the app's default selection. Strict/fail-closed
+ * for vision/video/reasoning (an unset flag never counts as capable); tool
+ * calling mirrors the per-model resolution rule below, where it's assumed
+ * supported unless a provider explicitly reports `false`.
+ */
+function anyModelHasCapability(index: CapabilityIndex, cap: "vision" | "video" | "reasoning" | "toolCalling"): boolean {
+  for (const modelsById of index.byProvider.values()) {
+    for (const entry of modelsById.values()) {
+      if (cap === "vision" && entry.supportsVision === true) return true;
+      if (cap === "video" && entry.supportsVideo === true) return true;
+      if (cap === "reasoning" && entry.supportsReasoning === true) return true;
+      if (cap === "toolCalling" && entry.toolCalling !== false) return true;
+    }
+  }
+  return false;
+}
+
 /** Capabilities for a routable model id, e.g. "openai/gpt-4o" or "auto". */
 export function modelCapabilities(fullId: string, index: CapabilityIndex): ModelCapabilities {
   const { prefix, rest } = splitModelId(fullId);
 
-  // Virtual "auto" routers can reach anything.
+  // Virtual "auto" router — only ever reaches what's actually configured.
   if (prefix === "" && (rest === "auto" || rest === "auto/coding" || rest === "auto-coding")) {
-    return { vision: true, video: true, reasoning: true, toolCalling: true };
+    return {
+      vision: anyModelHasCapability(index, "vision"),
+      video: anyModelHasCapability(index, "video"),
+      reasoning: anyModelHasCapability(index, "reasoning"),
+      toolCalling: anyModelHasCapability(index, "toolCalling"),
+    };
   }
 
   const entry =
@@ -231,4 +258,32 @@ export function modelCapabilities(fullId: string, index: CapabilityIndex): Model
 /** Friendly group label for a model prefix (public alias → connection display name). */
 export function providerLabel(prefix: string, index: CapabilityIndex): string {
   return index.aliasToLabel.get(prefix) || prefix || "auto";
+}
+
+// ------------------------------------------------------------- media models
+
+const IMAGE_MODEL_ID_HINT = /image|dall|flux|midjourney|stable|imagen|sdxl|sana|qwen-image|graphic|illustration/i;
+const VIDEO_MODEL_ID_HINT = /video|veo|kling|runway|sora|pixverse|wan/i;
+
+/**
+ * How well a model fits an image/video generation request: 2 when its
+ * capability flag says so, 1 when only its id hints at it (no catalog data),
+ * 0 when neither. Shared by GenerationPanel's own model dropdown and the
+ * Composer's "is this feature usable at all" gate so the two can't drift.
+ */
+export function mediaModelScore(id: string, caps: ModelCapabilities, mode: "image" | "video"): 0 | 1 | 2 {
+  if (mode === "video") {
+    if (caps.video) return 2;
+    if (VIDEO_MODEL_ID_HINT.test(id)) return 1;
+    return 0;
+  }
+  if (caps.vision) return 2;
+  if (IMAGE_MODEL_ID_HINT.test(id)) return 1;
+  return 0;
+}
+
+/** True if at least one real (non-"auto") configured model can serve the given
+ *  generation mode. "edit" shares "image"'s answer — both need image capability. */
+export function hasMediaCapableModel(models: OmniModel[], index: CapabilityIndex, mode: "image" | "video"): boolean {
+  return models.some((m) => m.id !== "auto" && mediaModelScore(m.id, modelCapabilities(m.id, index), mode) > 0);
 }

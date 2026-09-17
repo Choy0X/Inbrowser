@@ -1,8 +1,9 @@
-import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, Ghost, GripVertical, Loader2 } from "lucide-react";
 import type { Attachment, ChatMessage, Conversation, GeneratedArtifact, OmniModel } from "../lib/types";
 import type { CapabilityIndex, ModelCapabilities } from "../lib/capabilities";
+import { hasMediaCapableModel } from "../lib/capabilities";
 import type { Skill } from "../lib/skills";
 import { MessageBubble } from "./MessageBubble";
 import { Welcome } from "./Welcome";
@@ -129,6 +130,15 @@ export function ChatView({
   const [showScrollButton, setShowScrollButton] = useState(false);
 
   const messages = conversation?.messages ?? [];
+
+  const hasImageCapableModel = useMemo(
+    () => hasMediaCapableModel(models, capabilityIndex, "image"),
+    [models, capabilityIndex]
+  );
+  const hasVideoCapableModel = useMemo(
+    () => hasMediaCapableModel(models, capabilityIndex, "video"),
+    [models, capabilityIndex]
+  );
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -340,6 +350,8 @@ export function ChatView({
         model={model}
         hasModels={models.length > 0}
         caps={caps}
+        hasImageCapableModel={hasImageCapableModel}
+        hasVideoCapableModel={hasVideoCapableModel}
         streaming={streaming}
         skills={skills}
         activeSkillNames={activeSkillNames}

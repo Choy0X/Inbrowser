@@ -86,33 +86,114 @@ export function fileToDataUrl(file: File): Promise<string> {
  *  no visible quality loss. */
 const MAX_IMAGE_EDGE = 2048;
 const IMAGE_JPEG_QUALITY = 0.85;
+/** Byte target the iterative compression loop below aims for. A mitigation,
+ *  not a proven fix, for large image payloads being the most likely thing to
+ *  trip a transport-level cap/drop on a constrained relay or community-tier
+ *  provider — most everyday screenshots/photos never reach this after the
+ *  first-pass encode below and pass through untouched. */
+const IMAGE_TARGET_BYTES = 1.5 * 1024 * 1024;
+const MIN_JPEG_QUALITY = 0.5;
+/** Never shrink below this edge length just to hit the byte target. */
+const MIN_JPEG_EDGE = 768;
+const MAX_COMPRESSION_ITERATIONS = 6;
 
-/** Resize an image data URL to MAX_IMAGE_EDGE on its longest side; a no-op
- *  if it's already small. Fails open (returns the original) on any error,
- *  since a slightly larger upload is far better than a dropped image. */
+/** Cheap approximate alpha check — samples a handful of representative
+ *  pixels (corners + center) rather than scanning the whole image, since
+ *  this only needs to answer "is flattening to JPEG safe here or not."
+ *  Fails toward "yes, treat as transparent" (keep PNG) if sampling itself
+ *  fails, since a wrongly-flattened image is worse than a wrongly-kept-large
+ *  one. */
+function canvasHasTransparency(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return true;
+  const { width, height } = canvas;
+  const points: [number, number][] = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1],
+    [Math.floor(width / 2), Math.floor(height / 2)],
+  ];
+  try {
+    for (const [x, y] of points) {
+      const alpha = ctx.getImageData(Math.max(0, x), Math.max(0, y), 1, 1).data[3];
+      if (alpha < 255) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Resize (and, when it won't visibly matter, re-compress) an image data URL
+ *  so it stays well under IMAGE_TARGET_BYTES. Always caps the longest side at
+ *  MAX_IMAGE_EDGE first; a PNG/GIF source that samples as having real
+ *  transparency is kept as PNG untouched (converting it to JPEG would
+ *  flatten transparent regions onto black), everything else iteratively
+ *  steps JPEG quality then edge length down until it fits the target or the
+ *  floors are hit. Fails open (returns the original) on any error, since a
+ *  slightly larger upload is far better than a dropped image. */
 export function downscaleImageDataUrl(dataUrl: string): Promise<string> {
   if (dataUrl.startsWith("data:image/svg")) return Promise.resolve(dataUrl); // vector — no benefit
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const { width, height } = img;
-      const longest = Math.max(width, height);
-      if (!longest || longest <= MAX_IMAGE_EDGE) {
+      try {
+        const { width, height } = img;
+        const longest = Math.max(width, height);
+        const needsResize = Boolean(longest) && longest > MAX_IMAGE_EDGE;
+        if (!needsResize && dataUrlBytes(dataUrl) <= IMAGE_TARGET_BYTES) {
+          resolve(dataUrl); // already small enough — don't touch it
+          return;
+        }
+
+        const drawAt = (edge: number): HTMLCanvasElement | null => {
+          const scale = longest > edge ? edge / longest : 1;
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(width * scale));
+          canvas.height = Math.max(1, Math.round(height * scale));
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return null;
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          return canvas;
+        };
+
+        let canvas = drawAt(MAX_IMAGE_EDGE);
+        if (!canvas) {
+          resolve(dataUrl);
+          return;
+        }
+
+        const isPngLike = dataUrl.startsWith("data:image/png") || dataUrl.startsWith("data:image/gif");
+        if (isPngLike && canvasHasTransparency(canvas)) {
+          resolve(canvas.toDataURL("image/png"));
+          return;
+        }
+
+        // No transparency to protect (or not a PNG/GIF source) — free to
+        // re-encode as JPEG, stepping quality then resolution down until the
+        // result fits the byte target or both floors are hit.
+        let edge = Math.max(canvas.width, canvas.height);
+        let quality = IMAGE_JPEG_QUALITY;
+        let encoded = canvas.toDataURL("image/jpeg", quality);
+        for (let i = 0; i < MAX_COMPRESSION_ITERATIONS && dataUrlBytes(encoded) > IMAGE_TARGET_BYTES; i++) {
+          if (quality > MIN_JPEG_QUALITY) {
+            quality = Math.max(MIN_JPEG_QUALITY, quality - 0.1);
+          } else if (edge > MIN_JPEG_EDGE) {
+            edge = Math.max(MIN_JPEG_EDGE, Math.round(edge * 0.8));
+            const next = drawAt(edge);
+            if (!next) break;
+            canvas = next;
+            quality = IMAGE_JPEG_QUALITY;
+          } else {
+            break; // both floors hit — accept whatever we have
+          }
+          encoded = canvas.toDataURL("image/jpeg", quality);
+        }
+        resolve(encoded);
+      } catch {
         resolve(dataUrl);
-        return;
       }
-      const scale = MAX_IMAGE_EDGE / longest;
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(width * scale);
-      canvas.height = Math.round(height * scale);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        resolve(dataUrl);
-        return;
-      }
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      const keepPng = dataUrl.startsWith("data:image/png") || dataUrl.startsWith("data:image/gif");
-      resolve(keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY));
     };
     img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   $createParagraphNode,
   $getRoot,
@@ -81,6 +81,8 @@ interface ComposerProps {
   model: string;
   hasModels: boolean;
   caps: ModelCapabilities;
+  hasImageCapableModel: boolean;
+  hasVideoCapableModel: boolean;
   streaming: boolean;
   skills: Skill[];
   activeSkillNames: string[];
@@ -121,6 +123,8 @@ function ComposerInner({
   model,
   hasModels,
   caps,
+  hasImageCapableModel,
+  hasVideoCapableModel,
   streaming,
   skills,
   activeSkillNames,
@@ -144,11 +148,16 @@ function ComposerInner({
   const [infoSkillId, setInfoSkillId] = useState<string | null>(null);
   const [readingDoc, setReadingDoc] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const docInputRef = useRef<HTMLInputElement>(null);
   const pendingKindRef = useRef<AttachmentKind>("text");
   const lastSelectionRef = useRef<RangeSelection | null>(null);
+  // Counts nested enter/leave pairs as the pointer crosses child elements —
+  // a plain boolean flickers `dragActive` off every time the drag crosses
+  // from the container into one of its children.
+  const dragDepthRef = useRef(0);
 
   // Non-React readers (SkillTokenNode.getTextContent, called from inside
   // Lexical's own tree, not React) need the live skills list — mirrored the
@@ -243,6 +252,38 @@ function ComposerInner({
       fileInputRef.current.click();
     }
     setMenuOpen(false);
+  };
+
+  const hasFilesDrag = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
+
+  const onComposerDragEnter = (e: DragEvent) => {
+    if (!hasFilesDrag(e)) return;
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    setDragActive(true);
+  };
+
+  const onComposerDragOver = (e: DragEvent) => {
+    if (!hasFilesDrag(e)) return;
+    // Required on dragover (not just drop) or the browser refuses the drop.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const onComposerDragLeave = (e: DragEvent) => {
+    if (!hasFilesDrag(e)) return;
+    e.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragActive(false);
+  };
+
+  const onComposerDrop = (e: DragEvent) => {
+    if (!hasFilesDrag(e)) return;
+    e.preventDefault();
+    dragDepthRef.current = 0;
+    setDragActive(false);
+    if (streaming) return;
+    void handleFiles(e.dataTransfer.files);
   };
 
   /** Read the contents of document file(s) and send them to the LLM in one go. */
@@ -378,7 +419,19 @@ function ComposerInner({
 
   return (
     <SkillComposerProvider value={{ skills, onOpenInfo: setInfoSkillId }}>
-      <div data-ui="measure" className="mx-auto w-full px-4 pb-5 sm:pb-6">
+      <div
+        data-ui="measure"
+        className="relative mx-auto w-full px-4 pb-5 sm:pb-6"
+        onDragEnter={onComposerDragEnter}
+        onDragOver={onComposerDragOver}
+        onDragLeave={onComposerDragLeave}
+        onDrop={onComposerDrop}
+      >
+        {dragActive && (
+          <div className="pointer-events-none absolute inset-0 z-20 m-2 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-accent/10 text-sm font-medium text-accent">
+            Drop to attach
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
             {attachments.map((att) => {
@@ -450,31 +503,31 @@ function ComposerInner({
                   <Globe size={18} />
                 </button>
               </Tooltip>
-              <Tooltip label="Generate image">
+              <Tooltip label={hasImageCapableModel ? "Generate image" : "No image-capable model configured"}>
                 <button
                   type="button"
                   onClick={() => onOpenGenerate("image")}
-                  disabled={streaming}
+                  disabled={streaming || !hasImageCapableModel}
                   className="hidden rounded-md border border-border bg-canvas p-2 text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40 md:inline-flex"
                 >
                   <ImageIcon size={18} />
                 </button>
               </Tooltip>
-              <Tooltip label="Edit image">
+              <Tooltip label={hasImageCapableModel ? "Edit image" : "No image-capable model configured"}>
                 <button
                   type="button"
                   onClick={() => onOpenGenerate("edit")}
-                  disabled={streaming}
+                  disabled={streaming || !hasImageCapableModel}
                   className="hidden rounded-md border border-border bg-canvas p-2 text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40 md:inline-flex"
                 >
                   <ScanLine size={18} />
                 </button>
               </Tooltip>
-              <Tooltip label="Generate video">
+              <Tooltip label={hasVideoCapableModel ? "Generate video" : "No video-capable model configured"}>
                 <button
                   type="button"
                   onClick={() => onOpenGenerate("video")}
-                  disabled={streaming}
+                  disabled={streaming || !hasVideoCapableModel}
                   className="hidden rounded-md border border-border bg-canvas p-2 text-fg-dim transition-colors hover:bg-bg-hover hover:text-fg disabled:opacity-40 md:inline-flex"
                 >
                   <Film size={18} />
@@ -641,7 +694,7 @@ function ComposerInner({
                           onOpenGenerate("image");
                           setMoreOpen(false);
                         }}
-                        disabled={streaming}
+                        disabled={streaming || !hasImageCapableModel}
                         className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-medium hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <ImageIcon size={16} className="shrink-0 text-accent" />
@@ -653,7 +706,7 @@ function ComposerInner({
                           onOpenGenerate("edit");
                           setMoreOpen(false);
                         }}
-                        disabled={streaming}
+                        disabled={streaming || !hasImageCapableModel}
                         className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-medium hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <ScanLine size={16} className="shrink-0 text-accent" />
@@ -665,7 +718,7 @@ function ComposerInner({
                           onOpenGenerate("video");
                           setMoreOpen(false);
                         }}
-                        disabled={streaming}
+                        disabled={streaming || !hasVideoCapableModel}
                         className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-medium hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <Film size={16} className="shrink-0 text-accent" />
