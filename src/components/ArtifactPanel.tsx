@@ -233,6 +233,7 @@ export function ArtifactPanel({
           if (isPhp) setPhpHtml((h) => (h ? `${h}\n${line}` : line));
         },
         onStderr: (line) => setRunLines((l) => [...l, { stream: "stderr", text: line }]),
+        onStatus: (line) => setRunLines((l) => [...l, { stream: "status", text: line }]),
         onInputRequest: handleInputRequest,
         signal: controller.signal,
       })

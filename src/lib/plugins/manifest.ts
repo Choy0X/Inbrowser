@@ -13,7 +13,7 @@
  * is how the catalog reaches hundreds of items without hundreds of closures.
  */
 
-export type PluginCategory = "runtime" | "model" | "tool";
+export type PluginCategory = "runtime" | "model" | "tool" | "package";
 
 export type PluginKind =
   /** A language runtime with its own bespoke installer (Pyodide, the JS worker). */
@@ -21,7 +21,10 @@ export type PluginKind =
   /** Weights for a local model, downloaded through the inference runtime. */
   | "local-model"
   /** Sandboxed JavaScript that contributes tools to the agent loop. */
-  | "worker-tool";
+  | "worker-tool"
+  /** A Python library from the Pyodide distribution, downloaded as a wheel into
+   *  the Python runtime's own Cache Storage bucket. */
+  | "python-package";
 
 export type PluginRequirement = "webgpu" | "wasm" | "chrome-ai";
 

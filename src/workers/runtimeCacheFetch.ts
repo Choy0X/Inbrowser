@@ -14,19 +14,34 @@
 export function installCacheFirstFetch(cacheName: string): void {
   const realFetch = self.fetch.bind(self);
   self.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    // `new Request(input, init)` carries `integrity` through, so Pyodide's SRI
+    // check on a package wheel still applies on the network path below. A cache
+    // hit skips it, which is correct: the entry was only written after a
+    // response that had already passed it.
     const request = input instanceof Request ? input : new Request(input, init);
-    if (request.method === "GET") {
+    if (request.method !== "GET") return realFetch(request);
+
+    // Scoped to the Cache Storage calls *only*. This used to wrap the network
+    // fetch too, so a failed request fell into the catch and was retried by the
+    // call below - every failure cost two round trips, and the error the caller
+    // finally saw came from the second attempt rather than the real one.
+    let cache: Cache | undefined;
+    try {
+      cache = await caches.open(cacheName);
+      const cached = await cache.match(request);
+      if (cached) return cached;
+    } catch {
+      /* Cache Storage unavailable — fall through to a normal network fetch */
+    }
+
+    const response = await realFetch(request);
+    if (cache && response.ok) {
       try {
-        const cache = await caches.open(cacheName);
-        const cached = await cache.match(request);
-        if (cached) return cached;
-        const response = await realFetch(request);
-        if (response.ok) void cache.put(request, response.clone());
-        return response;
+        void cache.put(request, response.clone());
       } catch {
-        /* Cache Storage unavailable — fall through to a normal network fetch */
+        /* Quota exceeded or an opaque response — serving it still works */
       }
     }
-    return realFetch(request);
+    return response;
   };
 }

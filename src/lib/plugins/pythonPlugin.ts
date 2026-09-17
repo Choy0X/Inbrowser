@@ -1,5 +1,6 @@
 import { createPythonRunner } from "../codeRunners/python";
 import { loadPluginStates, savePluginStates } from "../pluginStore";
+import { clearInstalledPackages } from "../python/packageStore";
 import { installCachedRuntimeAssets } from "./cacheStorageRuntimeInstall";
 import type { InstallProgress, Plugin } from "./types";
 
@@ -27,6 +28,10 @@ export const pythonPlugin: Plugin = {
 
   async uninstall(): Promise<void> {
     await caches.delete(PYTHON_CACHE_NAME);
+    // Package wheels live in that same bucket, so removing the runtime removes
+    // them too - the record has to go with them or every package would still
+    // read as installed after a reinstall that downloaded none of them.
+    clearInstalledPackages();
     const states = loadPluginStates();
     savePluginStates({ ...states, python: { installed: false, enabled: false } });
   },

@@ -1,13 +1,15 @@
 import type { InstallProgress, PluginExecutor, PluginManifest } from "./manifest";
 import { PLUGINS } from "./registry";
+import { PYTHON_CACHE_NAME } from "./pythonPlugin";
 import { loadPluginStates, getPluginState, savePluginStates } from "../pluginStore";
+import { installedPackagesSync } from "../python/packageStore";
 import { registerLocalModel, unregisterLocalModel } from "../gateway/local/register";
 
 /** The runtime every "local-model" plugin belongs to. */
 const RUNTIME_ID = "webllm";
 
 /**
- * The generic executors behind the catalog. Six kinds were planned; three exist
+ * The generic executors behind the catalog. Six kinds were planned; four exist
  * because those are the ones with a real implementation behind them - listing
  * kinds that cannot actually install anything would make the store lie.
  */
@@ -187,6 +189,68 @@ const workerTool: PluginExecutor = {
 };
 
 /**
+ * A Python library from the Pyodide distribution.
+ *
+ * "Installing" means pre-warming the Python runtime's existing Cache Storage
+ * bucket with the package's wheel and those of everything it depends on, so the
+ * first `import` is instant and works offline. Running code that imports a
+ * package does the same thing on demand (runtimeCacheFetch caches every
+ * successful GET) - this is the deliberate, ahead-of-time version of it.
+ */
+const pythonPackage: PluginExecutor = {
+  kind: "python-package",
+
+  async install(manifest, onProgress, signal) {
+    const name = String(manifest.config.packageName ?? manifest.name);
+    const [{ loadPyodidePackages, resolveClosure, wheelUrl }, { recordPackageInstalled }] =
+      await Promise.all([import("../python/packages"), import("../python/packageStore")]);
+
+    onProgress({ loaded: 0, total: 1, text: "Resolving dependencies" });
+    const closure = resolveClosure([name], await loadPyodidePackages());
+    if (closure.length === 0) throw new Error(`"${name}" is not in this Pyodide build.`);
+
+    const cache = await caches.open(PYTHON_CACHE_NAME);
+    for (let i = 0; i < closure.length; i++) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const pkg = closure[i];
+      onProgress({ loaded: i, total: closure.length, text: pkg.name });
+      const url = wheelUrl(pkg);
+      // Already warm from an earlier install or run - a shared dependency like
+      // numpy is in most closures, and re-downloading it would be the bulk of
+      // the wait.
+      if (await cache.match(url)) continue;
+      const response = await fetch(url, { signal });
+      if (!response.ok) throw new Error(`Could not download ${pkg.name} (${response.status}).`);
+      await cache.put(url, response);
+    }
+
+    onProgress({ loaded: closure.length, total: closure.length, text: "Installed" });
+    recordPackageInstalled(name);
+  },
+
+  async uninstall(manifest) {
+    const name = String(manifest.config.packageName ?? manifest.name);
+    const [{ loadPyodidePackages, resolveClosure, wheelUrl }, { recordPackageUninstalled }] =
+      await Promise.all([import("../python/packages"), import("../python/packageStore")]);
+
+    // Only this package's own wheel is dropped. Its dependencies stay: they are
+    // shared, and there is no reference counting here - removing numpy because
+    // pandas was removed would silently break scipy.
+    const [self] = resolveClosure([name], await loadPyodidePackages());
+    if (self) {
+      const cache = await caches.open(PYTHON_CACHE_NAME);
+      await cache.delete(wheelUrl(self));
+    }
+    recordPackageUninstalled(name);
+  },
+
+  async isInstalled(manifest) {
+    const { installedPackagesSync } = await import("../python/packageStore");
+    return installedPackagesSync().has(String(manifest.config.packageName ?? manifest.name));
+  },
+};
+
+/**
  * Install state for a whole catalogue without touching Cache Storage.
  *
  * Answers instantly for every entry, and is right for anything installed
@@ -195,11 +259,14 @@ const workerTool: PluginExecutor = {
  */
 export function knownInstalledIds(manifests: PluginManifest[]): Set<string> {
   const models = installedModelIdsSync();
+  const packages = installedPackagesSync();
   const states = loadPluginStates();
   const known = new Set<string>();
   for (const manifest of manifests) {
     if (manifest.kind === "local-model") {
       if (models.has(String(manifest.config.modelId ?? ""))) known.add(manifest.id);
+    } else if (manifest.kind === "python-package") {
+      if (packages.has(String(manifest.config.packageName ?? manifest.name))) known.add(manifest.id);
     } else if (manifest.kind === "worker-tool") {
       if (getPluginState(states, manifest.id).installed) known.add(manifest.id);
     } else if (manifest.kind === "builtin-runtime") {
@@ -211,7 +278,7 @@ export function knownInstalledIds(manifests: PluginManifest[]): Set<string> {
   return known;
 }
 
-const EXECUTORS: PluginExecutor[] = [builtinRuntime, localModel, workerTool];
+const EXECUTORS: PluginExecutor[] = [builtinRuntime, localModel, workerTool, pythonPackage];
 
 export function executorFor(manifest: PluginManifest): PluginExecutor {
   const executor = EXECUTORS.find((e) => e.kind === manifest.kind);

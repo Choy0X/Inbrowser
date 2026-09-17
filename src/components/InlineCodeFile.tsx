@@ -210,6 +210,7 @@ export function InlineCodeFile({
         onReady: () => setRunStatus("running"),
         onStdout: (line) => setRunLines((l) => [...l, { stream: "stdout", text: line }]),
         onStderr: (line) => setRunLines((l) => [...l, { stream: "stderr", text: line }]),
+        onStatus: (line) => setRunLines((l) => [...l, { stream: "status", text: line }]),
         onInputRequest: (prompt) =>
           new Promise<string | null>((resolve) => {
             pendingInputResolveRef.current = resolve;

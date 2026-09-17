@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Store } from "lucide-react";
 import type { Skill } from "../lib/skills";
+import { getPluginState, usePluginStates } from "../lib/pluginStore";
 import { PageShell } from "./PageShell";
 import { PluginCatalog } from "./PluginsView";
 import { SkillStore } from "./SkillStore";
@@ -14,7 +15,7 @@ import { Tabs } from "./ui";
  * so "where do I get more?" had two different answers. Everything installable
  * now lives here under categories; authoring stays on /library.
  */
-type StoreTab = "runtimes" | "tools" | "models" | "skills";
+type StoreTab = "runtimes" | "tools" | "models" | "packages" | "skills";
 
 export function StoreView({
   skills,
@@ -24,6 +25,18 @@ export function StoreView({
   onSaveSkills: (skills: Skill[]) => void;
 }) {
   const [tab, setTab] = useState<StoreTab>("runtimes");
+
+  // Python libraries are only meaningful once the runtime that imports them is
+  // installed, so the tab appears with it. Installing Python is done on the
+  // Runtimes tab right here, so this updates in place.
+  const pluginStates = usePluginStates();
+  const pythonInstalled = getPluginState(pluginStates, "python").installed;
+
+  // Uninstalling Python while its own tab is open would otherwise leave the
+  // Tabs strip with a value none of its options carry.
+  useEffect(() => {
+    if (!pythonInstalled && tab === "packages") setTab("runtimes");
+  }, [pythonInstalled, tab]);
 
   return (
     <PageShell
@@ -40,6 +53,7 @@ export function StoreView({
             { value: "runtimes", label: "Runtimes" },
             { value: "tools", label: "Tools" },
             { value: "models", label: "Models" },
+            ...(pythonInstalled ? [{ value: "packages" as const, label: "Packages" }] : []),
             { value: "skills", label: "Skills" },
           ]}
         />

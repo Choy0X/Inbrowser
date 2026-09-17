@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import { loadPyodide, type PyodideInterface } from "pyodide";
 import { requestInputSync } from "../lib/codeRunners/interactiveStdin";
+import { PYODIDE_PACKAGE_BASE_URL } from "../lib/python/packages";
 import { installCacheFirstFetch } from "./runtimeCacheFetch";
 
 export {};
@@ -8,12 +9,17 @@ export {};
 // Gives Pyodide's own internal asset-loading fetches (the .wasm binary,
 // python_stdlib.zip, pyodide-lock.json, …) a chance to hit the Cache Storage
 // bucket populated by pythonPlugin.install() - see runtimeCacheFetch.ts.
+// It caches any successful GET opportunistically, which is also what makes a
+// package wheel downloaded on one run available offline on the next.
 installCacheFirstFetch("fachoy-plugin-python");
 
 type InMessage = { kind: "run"; runId: string; code: string; interactive?: boolean; buffer?: SharedArrayBuffer };
 type OutMessage =
   | { kind: "ready"; runId: string }
   | { kind: "stdout" | "stderr"; runId: string; line: string }
+  /** Loader chatter ("Loading numpy, pandas") - neither the program's output
+   *  nor an error, and rendered dim so it can't be mistaken for either. */
+  | { kind: "status"; runId: string; line: string }
   | { kind: "done"; runId: string }
   | { kind: "error"; runId: string; message: string }
   | { kind: "input-request"; runId: string; prompt: string };
@@ -92,55 +98,20 @@ function needsNetworkPatch(code: string): boolean {
 /**
  * pyodide-http, requests and their dependencies are all packages Pyodide
  * itself vendors (prebuilt for this exact Python/ABI), so no PyPI/micropip
- * round trip is needed - but `pyodide.loadPackage("requests")` still resolves
- * against `indexURL` ("/pyodide/", this app's own self-hosted origin, which
- * deliberately ships only the 4 core runtime files - see vite.config.ts's
- * PYODIDE_RUNTIME_FILES comment - no .whl files at all), so a bare name-based
- * load 404s. Reading the *local* pyodide-lock.json (already self-hosted, so
- * this part needs no network) for the exact file names and walking their
- * `depends` graph lets us fetch just those wheels directly from jsdelivr's
- * Pyodide CDN instead - already relied on elsewhere in this codebase
- * (skillMarketplace.ts) and version-pinned to match this exact Pyodide build,
- * so this is the one deliberate, narrow exception to "self-hosted, never a
- * CDN": it only runs when a script actually asks for the network, which
- * inherently requires being online anyway. Everything else stays fully
- * self-hosted and offline-capable.
+ * round trip is needed - `loadPackage` resolves them by name against
+ * `packageBaseUrl` and walks their `depends` graph itself.
+ *
+ * This used to read the local lock file, walk that graph by hand and build
+ * jsdelivr URLs itself, because `packageBaseUrl` still defaulted to
+ * "/pyodide/" - which ships no .whl files, so a bare name-based load 404'd.
+ * Setting `packageBaseUrl` at boot (see getPyodide below) fixes that for every
+ * package rather than for these two, and made all of that machinery redundant.
  */
 const NETWORK_PATCH_PY = `
 import pyodide_js as _fachoy_pjs
-from pyodide.http import pyfetch as _fachoy_pyfetch
 
 async def _fachoy_install_network():
-    resp = await _fachoy_pyfetch("/pyodide/pyodide-lock.json")
-    lock = await resp.json()
-    packages = lock["packages"]
-
-    def _find(key):
-        return next((pk for pk in packages if pk.lower() == key), None)
-
-    def _closure(names):
-        seen = set()
-        stack = list(names)
-        while stack:
-            n = stack.pop()
-            key = n.lower().replace("_", "-")
-            if key in seen:
-                continue
-            match = _find(key)
-            if not match:
-                continue
-            seen.add(key)
-            stack.extend(packages[match].get("depends", []))
-        return seen
-
-    version = _fachoy_pjs.version
-    urls = []
-    for key in _closure(["pyodide-http", "requests"]):
-        match = _find(key)
-        if match:
-            urls.append(f"https://cdn.jsdelivr.net/pyodide/v{version}/full/{packages[match]['file_name']}")
-
-    await _fachoy_pjs.loadPackage(urls)
+    await _fachoy_pjs.loadPackage(["pyodide-http", "requests"])
 
     import pyodide_http
     pyodide_http.patch_all()
@@ -153,6 +124,12 @@ async function getPyodide(): Promise<PyodideInterface> {
     pyodidePromise = (async () => {
       const pyodide = await loadPyodide({
         indexURL: "/pyodide/",
+        // The core runtime stays self-hosted and offline-capable; only the
+        // wheels, which this app deliberately does not ship, resolve to the
+        // CDN. Without this, `packageBaseUrl` defaults to the directory of the
+        // lock file ("/pyodide/") and every `import pandas` 404s - see
+        // lib/python/packages.ts for why this is safe.
+        packageBaseUrl: PYODIDE_PACKAGE_BASE_URL,
         stdout: (line: string) => post({ kind: "stdout", runId: currentRunId, line }),
         stderr: (line: string) => post({ kind: "stderr", runId: currentRunId, line }),
         // Called synchronously by the WASM runtime mid-execution - there is no
@@ -207,12 +184,26 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
   try {
     const pyodide = await getPyodide();
     post({ kind: "ready", runId });
+    // Resolves the imports in `code` against the lock file and downloads
+    // whatever is missing (cached by runtimeCacheFetch after the first run).
+    //
+    // The callbacks are the only way to see what happened: loadPackagesFromImports
+    // catches each package's download failure internally and writes it straight
+    // to stderr, so it does not reject and the `try/catch` that used to wrap
+    // this never fired. That is how a raw "Failed to fetch" reached the UI with
+    // no explanation. Messages are routed to the status stream so loader
+    // chatter can't be mistaken for the program's own output.
     try {
-      await pyodide.loadPackagesFromImports(code);
-    } catch {
-      // Best-effort: only bundled stdlib is available in v1. A real
-      // third-party import surfaces as Python's own ModuleNotFoundError
-      // below instead of a confusing loader error here.
+      await pyodide.loadPackagesFromImports(code, {
+        messageCallback: (line) => post({ kind: "status", runId, line }),
+        errorCallback: (line) => post({ kind: "status", runId, line }),
+      });
+    } catch (err) {
+      post({
+        kind: "status",
+        runId,
+        line: `Could not prepare packages (${err instanceof Error ? err.message : String(err)}); continuing.`,
+      });
     }
     if (!networkPatched && needsNetworkPatch(code)) {
       try {

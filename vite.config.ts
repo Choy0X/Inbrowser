@@ -139,6 +139,13 @@ const RUNTIME_ASSET_CONFIGS: RuntimeAssetConfig[] = [
     // pyodide.mjs itself is NOT listed here — it's imported as a normal npm
     // package and bundled into pyodideWorker's own chunk by Vite; only the
     // assets Pyodide fetches at runtime via `indexURL` need to live here.
+    //
+    // No `.whl` files, and the npm package ships none: the full set is ~250 MB.
+    // pyodide-lock.json IS here, so Pyodide knows all ~356 packages exist and
+    // would resolve each one against indexURL and 404. The wheels instead come
+    // from a version-pinned CDN via `packageBaseUrl` — set in pyodideWorker.ts,
+    // explained in lib/python/packages.ts — with their integrity checked
+    // against the sha256 in this very lock file.
     files: ["pyodide.asm.mjs", "pyodide.asm.wasm", "pyodide-lock.json", "python_stdlib.zip"],
   },
   {

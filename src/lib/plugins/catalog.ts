@@ -319,19 +319,63 @@ export const BUNDLED_CATALOG: PluginManifest[] = [
 ];
 
 /**
- * The full catalog: the bundled entries plus every remaining WebLLM model,
- * loaded lazily so opening the store does not pull in the 6 MB runtime.
+ * Every Python library this Pyodide build can install, read from the
+ * self-hosted pyodide-lock.json rather than a list maintained here - so the
+ * catalog cannot offer something Pyodide would fail to install, and it follows
+ * a Pyodide upgrade for free.
+ *
+ * No size is shown: the lock carries none, and asking the CDN for ~356
+ * Content-Lengths to fill a column is precisely the per-entry fan-out the store
+ * is not allowed to do. The real figures appear per wheel during the install.
+ */
+async function pythonPackageManifests(): Promise<PluginManifest[]> {
+  const { loadPyodidePackages, installablePackages } = await import("../python/packages");
+  return installablePackages(await loadPyodidePackages()).map((pkg) => ({
+    id: `py-${pkg.name.toLowerCase()}`,
+    name: pkg.name,
+    description:
+      pkg.depends.length > 0
+        ? `Python library. Also downloads ${pkg.depends.slice(0, 3).join(", ")}${
+            pkg.depends.length > 3 ? ` and ${pkg.depends.length - 3} more` : ""
+          }.`
+        : "Python library with no further dependencies.",
+    version: pkg.version,
+    category: "package" as const,
+    kind: "python-package" as const,
+    tags: ["python", ...pkg.imports.slice(0, 4)],
+    estimatedSizeMB: 0,
+    config: { packageName: pkg.name },
+  }));
+}
+
+/**
+ * The full catalog: the bundled entries, every remaining WebLLM model, and the
+ * Python package index - the last two loaded lazily so opening the store pulls
+ * in neither the 6 MB runtime nor the lock file until it has to.
  */
 export async function buildCatalog(): Promise<PluginManifest[]> {
-  try {
-    const { prebuiltAppConfig } = await import("@mlc-ai/web-llm");
-    const featured = new Set(BUNDLED_CATALOG.map((m) => m.id));
-    const rest = prebuiltAppConfig.model_list
-      .map((m) => modelManifestFromId(m.model_id, m.vram_required_MB))
-      .filter((m) => !featured.has(m.id));
-    return [...BUNDLED_CATALOG, ...rest];
-  } catch {
-    // Offline, or WebGPU absent: the bundled entries still work.
-    return BUNDLED_CATALOG;
-  }
+  const [models, packages] = await Promise.all([
+    (async () => {
+      try {
+        const { prebuiltAppConfig } = await import("@mlc-ai/web-llm");
+        const featured = new Set(BUNDLED_CATALOG.map((m) => m.id));
+        return prebuiltAppConfig.model_list
+          .map((m) => modelManifestFromId(m.model_id, m.vram_required_MB))
+          .filter((m) => !featured.has(m.id));
+      } catch {
+        // Offline, or WebGPU absent: the bundled entries still work.
+        return [];
+      }
+    })(),
+    (async () => {
+      try {
+        return await pythonPackageManifests();
+      } catch {
+        // The lock file is only reachable once the Python runtime's assets are
+        // served; without it the rest of the store is unaffected.
+        return [];
+      }
+    })(),
+  ]);
+  return [...BUNDLED_CATALOG, ...models, ...packages];
 }

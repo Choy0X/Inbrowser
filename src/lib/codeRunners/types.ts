@@ -5,6 +5,14 @@ export interface RunCallbacks {
   onStdout: (line: string) => void;
   onStderr: (line: string) => void;
   /**
+   * The runtime saying what it is doing, rather than the program saying
+   * anything - Pyodide's "Loading numpy, pandas" while it downloads wheels is
+   * the case this exists for. Kept off stdout because a caller renders that as
+   * the program's own output, and off stderr because none of this is a failure.
+   * Optional: a runner that never reports progress simply never calls it.
+   */
+  onStatus?: (line: string) => void;
+  /**
    * The running program called input(prompt) and is waiting for a line of
    * text - `prompt` is the exact string passed to input() (captured directly
    * from Python via a stdin-adjacent monkeypatch, not scraped from stdout, so

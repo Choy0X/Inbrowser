@@ -4,7 +4,9 @@ import { CircleCheck, CircleX, Loader2, Square } from "lucide-react";
 export type RunStatus = "loading" | "running" | "success" | "error" | "aborted";
 
 export interface RunLine {
-  stream: "stdout" | "stderr";
+  /** "status" is the runtime talking about itself (downloading a package),
+   *  not the program's own output - rendered dim so the two can't be confused. */
+  stream: "stdout" | "stderr" | "status";
   text: string;
 }
 
@@ -152,7 +154,13 @@ export function CodeRunOutput({
           lines.map((line, i) => (
             <div
               key={i}
-              className={`whitespace-pre-wrap break-words ${line.stream === "stderr" ? "text-error" : "text-on-night"}`}
+              className={`whitespace-pre-wrap break-words ${
+                line.stream === "stderr"
+                  ? "text-error"
+                  : line.stream === "status"
+                    ? "text-on-night-soft"
+                    : "text-on-night"
+              }`}
             >
               {line.text}
             </div>

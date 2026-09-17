@@ -33,6 +33,9 @@ export type RunnerResponse =
   | { kind: "ready"; runId: string }
   | { kind: "stdout"; runId: string; line: string }
   | { kind: "stderr"; runId: string; line: string }
+  /** Runtime progress ("Loading numpy, pandas"), not program output. Optional
+   *  for a worker to send; only Pyodide does today. */
+  | { kind: "status"; runId: string; line: string }
   | { kind: "done"; runId: string }
   | { kind: "error"; runId: string; message: string }
   | { kind: "input-request"; runId: string; prompt: string };
@@ -123,6 +126,7 @@ export function createWorkerRunner({
           if (msg.kind === "ready") callbacks.onReady?.();
           else if (msg.kind === "stdout") callbacks.onStdout(msg.line);
           else if (msg.kind === "stderr") callbacks.onStderr(msg.line);
+          else if (msg.kind === "status") callbacks.onStatus?.(msg.line);
           else if (msg.kind === "done") finish({ kind: "success" });
           else if (msg.kind === "error") finish({ kind: "error", message: msg.message });
           else if (msg.kind === "input-request") {

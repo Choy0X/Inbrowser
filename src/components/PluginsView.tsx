@@ -32,11 +32,12 @@ import { localErrorMessage } from "../lib/gateway/local/errors";
 const ROW_ESTIMATE = 116;
 
 /** The Store's tab ids, mapped onto the manifest categories. */
-export type CatalogCategory = "runtimes" | "tools" | "models";
+export type CatalogCategory = "runtimes" | "tools" | "models" | "packages";
 const CATEGORY_OF: Record<CatalogCategory, PluginCategory> = {
   runtimes: "runtime",
   tools: "tool",
   models: "model",
+  packages: "package",
 };
 
 function formatSize(mb: number): string {
@@ -90,9 +91,17 @@ const PluginRow = memo(function PluginRow({
           <div className="flex flex-wrap items-center gap-1.5">
             {manifest.category === "model" && <Cpu size={13} className="shrink-0 text-accent" />}
             <span className="min-w-0 break-words text-sm font-medium">{manifest.name}</span>
-            <Badge>{formatSize(manifest.estimatedSizeMB)}</Badge>
+            {/* A package's estimatedSizeMB is 0 because the lock file carries no
+             *  sizes, not because it ships with the app - so it shows its
+             *  version rather than formatSize's "built in". */}
+            {manifest.category === "package" ? (
+              <Badge>v{manifest.version}</Badge>
+            ) : (
+              <Badge>{formatSize(manifest.estimatedSizeMB)}</Badge>
+            )}
             {manifest.category === "model" && <Badge tone="info">Offline</Badge>}
             {manifest.category === "tool" && <Badge tone="accent">Tool</Badge>}
+            {manifest.category === "package" && <Badge tone="accent">Python</Badge>}
           </div>
           <p className="mt-1 text-xs leading-relaxed text-fg-dim">{manifest.description}</p>
 
@@ -130,7 +139,9 @@ const PluginRow = memo(function PluginRow({
             </>
           ) : installed ? (
             <>
-              {manifest.category !== "model" && (
+              {/* A model has no on/off state, and neither does a package: a
+               *  downloaded wheel is either there for `import` or it isn't. */}
+              {manifest.category !== "model" && manifest.category !== "package" && (
                 <Toggle checked={enabled} onChange={(next) => onToggle(manifest, next)} />
               )}
               <IconButton
@@ -290,6 +301,15 @@ export function PluginCatalog({ category }: { category: CatalogCategory }) {
     getItemKey: (index) => filtered[index]?.id ?? index,
     overscan: 6,
   });
+
+  // Re-measure when the row list changes shape (e.g. a new search result set) -
+  // the virtualizer otherwise keeps stale offsets from the previous `filtered`.
+  // Missing here until the package catalogue made it obvious: 356 rows filtered
+  // down by a debounced query is exactly the case that leaves the list scrolling
+  // against the wrong total height.
+  useEffect(() => {
+    virtualizer.measure();
+  }, [filtered, virtualizer]);
 
   const installedHere = catalog.filter((m) => m.category === wanted && installed.has(m.id)).length;
 
