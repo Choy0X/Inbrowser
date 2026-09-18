@@ -32,6 +32,9 @@ const decoder = new TextDecoder();
 /** Domain separation, so the same secret could safely derive other keys later. */
 const HKDF_INFO = encoder.encode("inbrowser-relay-dial-v1");
 
+/** The "later" the line above anticipated. Separate label, same secret. */
+const BUCKET_INFO = encoder.encode("inbrowser-relay-bucket-v1");
+
 /** Derived keys, by secret. See deriveDialKey below for why this exists. */
 const dialKeyCache = new Map<string, Promise<CryptoKey>>();
 
@@ -108,6 +111,68 @@ export async function openDial(key: CryptoKey, frame: Uint8Array, now = Date.now
   // Absolute value: a clock skewed into the future is as suspect as a replay.
   if (Math.abs(now - dial.ts) > DIAL_MAX_AGE_MS) throw new Error("Dial timestamp is outside the accepted window");
   return dial;
+}
+
+/** Derived bucket keys, by secret. Same reasoning as dialKeyCache above. */
+const bucketKeyCache = new Map<string, Promise<CryptoKey>>();
+
+function bucketKey(secret: string): Promise<CryptoKey> {
+  const cached = bucketKeyCache.get(secret);
+  if (cached) return cached;
+  const pending = (async () => {
+    const material = await crypto.subtle.importKey("raw", encoder.encode(secret), "HKDF", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: BUCKET_INFO },
+      material,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+  })();
+  bucketKeyCache.set(secret, pending);
+  pending.catch(() => bucketKeyCache.delete(secret));
+  return pending;
+}
+
+/**
+ * An opaque per-user rate-limit bucket, carried inside the sealed dial.
+ *
+ * The Worker cannot rate-limit per user on its own: every dial reaches it from
+ * this one machine, so keying on the connecting address makes its limit a
+ * single global budget for the whole platform rather than a per-user one. This
+ * gives it something to key on that it cannot forge (the dial is sealed) and
+ * cannot resolve to a person from anything it observes (it never sees an
+ * address).
+ *
+ * Derived from RELAY_SECRET rather than a per-process salt. That is what makes
+ * it identical across every cluster worker and across restarts - a per-process
+ * salt would give one user a different bucket per worker, multiplying their
+ * real ceiling by the worker count and making it depend on which worker
+ * happened to take the connection.
+ *
+ * Not rotated, deliberately. Rotation cannot merge buckets here: the verifier
+ * is a counter keyed on an opaque string, with no way to know that yesterday's
+ * key and today's are the same user, so every rotation is a full quota reset -
+ * which is precisely the window a scanner would ride. Rotating hourly would
+ * hand every user 24 free resets a day.
+ *
+ * Be precise about what this is worth: the Worker holds RELAY_SECRET too, so it
+ * could recompute this value for a candidate address. The property is that it
+ * has no address to try - not that the mapping is hidden from someone who has
+ * both.
+ */
+export async function deriveBucket(secret: string, clientKey: string): Promise<string> {
+  const key = await bucketKey(secret);
+  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(clientKey));
+  // 128 bits is far more than enough to keep distinct users in distinct
+  // buckets, and a shorter key is a smaller thing to pass around.
+  return base64url(new Uint8Array(mac).subarray(0, 16));
+}
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** 16 random bytes as hex. Distinguishes two dials sealed in the same millisecond. */

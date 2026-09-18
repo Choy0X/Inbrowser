@@ -385,6 +385,9 @@ async function handleRelay(
       target: { host: target.hostname, port: targetPort },
       debugLog: config.debugLog,
       requestId: rid,
+      // The same key the limiter above uses. openTunnel hashes it into an
+      // opaque bucket before sealing; the address itself never leaves here.
+      clientKey,
     });
   } catch (err) {
     // The Worker's own message reaches the user here: a proxy that answered
