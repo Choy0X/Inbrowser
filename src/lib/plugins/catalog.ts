@@ -330,19 +330,25 @@ export const BUNDLED_CATALOG: PluginManifest[] = [
  */
 async function pythonPackageManifests(): Promise<PluginManifest[]> {
   const { loadPyodidePackages, installablePackages } = await import("../python/packages");
+  const { PACKAGE_DESCRIPTIONS } = await import("../python/packageDescriptions");
   return installablePackages(await loadPyodidePackages()).map((pkg) => ({
     id: `py-${pkg.name.toLowerCase()}`,
     name: pkg.name,
     description:
-      pkg.depends.length > 0
-        ? `Python library. Also downloads ${pkg.depends.slice(0, 3).join(", ")}${
+      PACKAGE_DESCRIPTIONS[pkg.name] ??
+      (pkg.depends.length > 0
+        ? `No description yet. Depends on ${pkg.depends.slice(0, 3).join(", ")}${
             pkg.depends.length > 3 ? ` and ${pkg.depends.length - 3} more` : ""
           }.`
-        : "Python library with no further dependencies.",
+        : "No description yet. Has no further dependencies."),
     version: pkg.version,
     category: "package" as const,
     kind: "python-package" as const,
     tags: ["python", ...pkg.imports.slice(0, 4)],
+    runtime: "python",
+    dependsOn: pkg.depends,
+    provides: pkg.imports,
+    homepage: `https://pypi.org/project/${pkg.name}/`,
     estimatedSizeMB: 0,
     config: { packageName: pkg.name },
   }));

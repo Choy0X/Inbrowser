@@ -3,7 +3,7 @@ import { Store } from "lucide-react";
 import type { Skill } from "../lib/skills";
 import { getPluginState, usePluginStates } from "../lib/pluginStore";
 import { PageShell } from "./PageShell";
-import { PluginCatalog } from "./PluginsView";
+import { PackageCatalog, PluginCatalog } from "./PluginsView";
 import { SkillStore } from "./SkillStore";
 import { Tabs } from "./ui";
 
@@ -61,6 +61,8 @@ export function StoreView({
     >
       {tab === "skills" ? (
         <SkillStore skills={skills} onSaveSkills={onSaveSkills} />
+      ) : tab === "packages" ? (
+        <PackageCatalog />
       ) : (
         <PluginCatalog category={tab} />
       )}

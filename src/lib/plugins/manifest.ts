@@ -39,6 +39,13 @@ export interface PluginManifest {
   author?: string;
   homepage?: string;
   license?: string;
+  /** Which runtime this belongs to, for categories that span more than one
+   *  (e.g. packages). Absent where there's only ever one kind of entry. */
+  runtime?: string;
+  /** Direct dependency names, for categories where that's meaningful. */
+  dependsOn?: string[];
+  /** Importable module names this entry makes available. */
+  provides?: string[];
   /** Download size, used to warn before a large install. 0 = nothing to fetch. */
   estimatedSizeMB: number;
   /** Ships as part of the app itself: cannot be toggled off or removed. */
