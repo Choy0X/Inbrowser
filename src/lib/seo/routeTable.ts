@@ -214,7 +214,7 @@ export const SEO_ROUTES: SeoRoute[] = [
       },
     ],
     indexable: true,
-    priority: 0.7,
+    priority: 0.4,
     changefreq: "monthly",
     jsonLd: "page",
     sourceFile: "src/components/TasksView.tsx",
@@ -250,6 +250,34 @@ export const SEO_ROUTES: SeoRoute[] = [
     changefreq: "monthly",
     jsonLd: "page",
     sourceFile: "src/components/PrivacyView.tsx",
+  },
+  {
+    path: "/about",
+    title: "About",
+    description:
+      "InBrowser is an independent, open-source project. Every claim it makes is reproducible in the app itself, and the full source is public on GitHub.",
+    h1: "About InBrowser",
+    intro:
+      "InBrowser is an independent, open-source project, not a company. There is no team page here because there is no team to list - what there is instead is a public source tree and an app where every claim below can be checked in one click.",
+    sections: [
+      {
+        heading: "Verify it, don't take it on faith",
+        body: "Every claim this site makes about running locally, storing nothing on a server, and needing no account is checkable in the app itself: open DevTools, watch the network tab, and confirm no provider, search or model-weight request ever targets this site's own origin except the optional proxy relay a visitor configures themselves. The full source is public at github.com/Choy0X/Inbrowser.",
+      },
+      {
+        heading: "What actually runs where",
+        body: "Chat models, code execution, agents, skills and storage all run on the visitor's own device: local models on WebGPU, twelve language runtimes compiled to WebAssembly, and conversations kept in the browser's own IndexedDB. Hosted providers are called directly from the browser rather than through a shared server, so a rate limit applies per person instead of being exhausted by everyone at once.",
+      },
+      {
+        heading: "An independent project",
+        body: "InBrowser has no company, no trademark and no commercial backing - it is built and maintained as an open-source project. That is stated plainly here rather than implied otherwise, because the credibility this site asks for should rest on what can be inspected, not on how official it sounds.",
+      },
+    ],
+    indexable: true,
+    priority: 0.6,
+    changefreq: "monthly",
+    jsonLd: "page",
+    sourceFile: "src/components/AboutView.tsx",
   },
 
   // Not indexed, but still served a real shell so the document carries a correct

@@ -481,7 +481,7 @@ function renderRobots(): string {
     // An app whose whole subject is in-browser AI wants to be citable by AI
     // search, so the assistant crawlers are allowed deliberately rather than
     // left to the wildcard.
-    ...["GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-User", "PerplexityBot", "Google-Extended"].flatMap(
+    ...["GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-User", "PerplexityBot", "Google-Extended", "CCBot"].flatMap(
       (bot) => [`User-agent: ${bot}`, "Allow: /", `Disallow: ${SEO_CHAT_PREFIX}`, ""],
     ),
     `Sitemap: ${BRAND.url}/sitemap.xml`,

@@ -129,6 +129,7 @@ const AgentBuilderView = lazy(() =>
 const ChangelogView = lazy(() =>
   import("./components/ChangelogView").then((m) => ({ default: m.ChangelogView })),
 );
+const AboutView = lazy(() => import("./components/AboutView").then((m) => ({ default: m.AboutView })));
 
 type GatewayStatus = "checking" | "ok" | "error";
 
@@ -1727,6 +1728,7 @@ export default function App() {
             {/* Two addressable pages, one component - see PrivacyView. */}
             <Route path="/features" element={<PrivacyView />} />
             <Route path="/privacy" element={<PrivacyView />} />
+            <Route path="/about" element={<AboutView />} />
             {/* Previous paths, kept so existing links and bookmarks resolve.
                 Mirrored by SEO_REDIRECTS and by the server's 301s. */}
             <Route path="/skills" element={<Navigate to="/library" replace />} />

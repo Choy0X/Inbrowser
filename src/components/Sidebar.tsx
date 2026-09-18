@@ -3,6 +3,7 @@ import { NavLink } from "./ui/NavLink";
 import {
   Bot,
   Clock,
+  Info,
   Menu,
   MoreHorizontal,
   PanelLeftClose,
@@ -331,6 +332,12 @@ export function Sidebar({
                 icon: <Shield size={16} />,
                 label: "Privacy policy",
                 to: "/privacy",
+                onSelect: closeMobile,
+              },
+              {
+                icon: <Info size={16} />,
+                label: "About",
+                to: "/about",
                 onSelect: closeMobile,
               },
               ...(hasChats
