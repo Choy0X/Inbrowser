@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.4.3",
+    "date": "2026-09-18",
+    "items": [
+      "Running JavaScript or TypeScript code can now import real npm packages (fetched from esm.sh the first time, then cached) and most Node built-ins - fs, path, crypto, http/https, events, util, buffer, and more - instead of failing with \"this sandbox has no npm or Node module resolution.\" Only raw sockets/processes (net, dns, child_process, ...) still aren't available.",
+      "Store → Packages is now a browsable, read-only list grouped by runtime, with a real description of what each package does and a link to its PyPI page - packages already install themselves the moment your code imports them, so the Install button was just extra friction."
+    ]
+  },
+  {
     "version": "0.4.2",
     "date": "2026-09-18",
     "items": [
