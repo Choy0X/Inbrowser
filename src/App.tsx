@@ -17,6 +17,7 @@ import {
   reduceArtifactEvent,
   type ArtifactStreamEvent,
 } from "./lib/artifacts";
+import { createFencedCodeArtifactParser } from "./lib/fencedCodeArtifacts";
 import {
   chatStream,
   editImages,
@@ -782,15 +783,25 @@ export default function App() {
         let assistantFiles: GeneratedArtifact[] = [];
         let responseFailed = false;
         const artifactParser = createArtifactStreamParser();
-        const applyProseAndEvents = (prose: string, events: ArtifactStreamEvent[]) => {
-          if (prose) {
-            assistantContent += prose;
-            appendToMessage(convoId, assistantMsg.id, (m) => ({ ...m, content: m.content + prose }));
-          }
+        // Second stage on the tag parser's own prose output: a model that just
+        // dumps a file in a plain ``` fence instead of the <fachoy-artifact>
+        // contract still gets it promoted into a real file artifact rather
+        // than left as inline chat text (see fencedCodeArtifacts.ts).
+        const fenceParser = createFencedCodeArtifactParser();
+        const applyFileEvents = (events: ArtifactStreamEvent[]) => {
           for (const ev of events) {
             assistantFiles = reduceArtifactEvent(assistantFiles, ev);
             applyArtifactEvent(convoId, assistantMsg.id, ev);
           }
+        };
+        const applyProseAndEvents = (rawProse: string, events: ArtifactStreamEvent[]) => {
+          applyFileEvents(events);
+          const fenced = fenceParser.push(rawProse);
+          if (fenced.prose) {
+            assistantContent += fenced.prose;
+            appendToMessage(convoId, assistantMsg.id, (m) => ({ ...m, content: m.content + fenced.prose }));
+          }
+          applyFileEvents(fenced.events);
         };
         try {
           const previousModel = [...liveMessages].reverse().find((m) => m.resolvedModel)?.resolvedModel;
@@ -820,6 +831,17 @@ export default function App() {
           {
             const { prose, events } = artifactParser.flush();
             applyProseAndEvents(prose, events);
+          }
+          {
+            // Closes out any fence still open when the turn ends (a model cut
+            // off mid-file) so it ends up "truncated" rather than losing its
+            // trailing content to the parser's internal buffer.
+            const fenced = fenceParser.flush();
+            if (fenced.prose) {
+              assistantContent += fenced.prose;
+              appendToMessage(convoId, assistantMsg.id, (m) => ({ ...m, content: m.content + fenced.prose }));
+            }
+            applyFileEvents(fenced.events);
           }
           toolCalls = result.toolCalls;
           if (!responseFailed && toolCalls.length === 0) {

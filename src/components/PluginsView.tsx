@@ -300,8 +300,21 @@ export function PackageCatalog() {
     overscan: 6,
   });
 
+  // Re-measure only when the row *keys* actually reshape, not on every render
+  // of this effect: `measure()` unconditionally clears the whole cached-height
+  // map, and `measureElement`'s refs only ever repopulate it when a DOM node
+  // actually (re)mounts. A same-shape update - e.g. `buildCatalog()` resolving
+  // moments after mount with a list that nets out to the same ids - still
+  // changes the `rows` array's identity and would otherwise wipe the heights
+  // those refs measured a moment earlier, pinning every already-mounted row to
+  // the (much taller) ROW_ESTIMATE with no resize event left to correct it.
+  const rowKeysRef = useRef<string | null>(null);
   useEffect(() => {
-    virtualizer.measure();
+    const keys = rows.map((r) => r.id).join("\u0000");
+    if (rowKeysRef.current !== null && rowKeysRef.current !== keys) {
+      virtualizer.measure();
+    }
+    rowKeysRef.current = keys;
   }, [rows, virtualizer]);
 
   return (
@@ -489,13 +502,26 @@ export function PluginCatalog({ category }: { category: CatalogCategory }) {
     overscan: 6,
   });
 
-  // Re-measure when the row list changes shape (e.g. a new search result set) -
-  // the virtualizer otherwise keeps stale offsets from the previous `filtered`.
-  // Missing here until the package catalogue made it obvious: 356 rows filtered
-  // down by a debounced query is exactly the case that leaves the list scrolling
+  // Re-measure only when the filtered *ids* actually reshape, not on every
+  // render of this effect. `measure()` unconditionally clears the whole
+  // cached-height map, and `measureElement`'s refs only repopulate it when a
+  // DOM node actually (re)mounts - so calling it for a same-shape update (e.g.
+  // `buildCatalog()` resolving moments after mount with a list that nets out
+  // to the same ids as the bundled one) throws away the heights those refs
+  // measured a moment earlier and pins every already-mounted row to the (much
+  // taller) ROW_ESTIMATE, with no resize event left to correct it - the
+  // visible symptom was a large gap under every card. A genuine reshape (a
+  // search or tab change) still needs it: without it the virtualizer keeps
+  // stale offsets from the previous `filtered`, and 356 rows filtered down by
+  // a debounced query is exactly the case that leaves the list scrolling
   // against the wrong total height.
+  const filteredIdsRef = useRef<string | null>(null);
   useEffect(() => {
-    virtualizer.measure();
+    const ids = filtered.map((m) => m.id).join("\u0000");
+    if (filteredIdsRef.current !== null && filteredIdsRef.current !== ids) {
+      virtualizer.measure();
+    }
+    filteredIdsRef.current = ids;
   }, [filtered, virtualizer]);
 
   const installedHere = catalog.filter((m) => m.category === wanted && installed.has(m.id)).length;

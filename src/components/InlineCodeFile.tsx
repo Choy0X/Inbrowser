@@ -28,10 +28,13 @@ import { Tooltip } from "./Tooltip";
  * in-browser runtime for its language.
  *
  * This is the same set of affordances ArtifactPanel offers, at the scale of a
- * snippet and without leaving the message. Blocks large enough to cross
- * fencedCodeArtifacts.ts's PROMOTE_THRESHOLD still become real artifacts and
- * open the side panel instead - this only covers everything below that line,
- * which previously had a Copy button and nothing else.
+ * snippet and without leaving the message. A fresh assistant message never
+ * reaches here with a fenced block still inline - fencedCodeArtifacts.ts
+ * promotes every one into a real artifact and opens the side panel instead.
+ * This only covers whatever a literal fence still is by the time it reaches
+ * Markdown.tsx: stored history from before that parser existed, or a context
+ * that doesn't route through it - which previously had a Copy button and
+ * nothing else.
  *
  * Mounted only for completed messages (see Markdown.tsx): while a message is
  * still streaming the plain highlighter renders, so nothing here re-runs per

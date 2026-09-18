@@ -121,10 +121,21 @@ export function ModelPickerModal({
     overscan: 12,
   });
 
-  // Re-measure when the row list changes shape (e.g. a new search result set) —
-  // the virtualizer otherwise keeps stale offsets from the previous `rows`.
+  // Re-measure only when the row *keys* actually reshape (e.g. a new search
+  // result set) — the virtualizer otherwise keeps stale offsets from the
+  // previous `rows`. But `measure()` unconditionally clears the whole
+  // cached-height map, and `measureElement`'s refs only repopulate it when a
+  // DOM node actually (re)mounts, so calling it on a render where the keys
+  // didn't change (starting with mount, where the refs just measured real
+  // heights synchronously during commit) pins every already-mounted row back
+  // to the estimate with no resize event left to correct it.
+  const rowKeysRef = useRef<string | null>(null);
   useEffect(() => {
-    virtualizer.measure();
+    const keys = rows.map((r) => r.key).join("\u0000");
+    if (rowKeysRef.current !== null && rowKeysRef.current !== keys) {
+      virtualizer.measure();
+    }
+    rowKeysRef.current = keys;
   }, [rows, virtualizer]);
 
   if (!open) return null;

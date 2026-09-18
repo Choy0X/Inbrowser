@@ -4,9 +4,12 @@ import { classify } from "./fencedCodeArtifacts";
  * Identity, naming and eligibility for the interactive code blocks rendered
  * inside chat prose (components/InlineCodeFile.tsx).
  *
- * A fenced block under fencedCodeArtifacts.ts's PROMOTE_THRESHOLD never becomes
- * an artifact, so it used to render as static highlighted text with nothing but
- * a Copy button. These helpers let the markdown renderer treat one as a small
+ * A fresh assistant message never keeps a fenced block inline - App.tsx pipes
+ * it through fencedCodeArtifacts.ts's parser, which promotes every non-empty
+ * fence straight into a file artifact. This is the fallback for whatever
+ * still reaches Markdown.tsx as a literal fence anyway: stored history from
+ * before that parser existed, or a fence in a context that never runs through
+ * it at all. These helpers let the markdown renderer treat one as a small
  * file instead - runnable, editable, downloadable - without duplicating the
  * naming rules the artifact path already owns.
  */
@@ -58,8 +61,8 @@ export function inlineCodeKey(code: string, occurrence: number): string {
  * Display name and download filename, e.g. "snippet-1.py".
  *
  * Delegates the extension to fencedCodeArtifacts.ts's own `classify` rather
- * than repeating its alias table, so an inline block and the artifact the same
- * fence would have become above the threshold never disagree about the type.
+ * than repeating its alias table, so this fallback and the artifact the same
+ * fence would normally have become never disagree about the type.
  */
 export function inlineCodeFilename(lang: string | undefined, code: string, index: number): string {
   const { ext } = classify(lang ?? "", code);

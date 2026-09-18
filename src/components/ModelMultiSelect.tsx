@@ -138,9 +138,21 @@ export function ModelMultiSelect({ models, onChange }: ModelMultiSelectProps) {
     overscan: 8,
   });
 
+  // Re-measure only when the filtered *ids* actually reshape - `measure()`
+  // unconditionally clears the whole cached-height map, and `measureElement`'s
+  // refs only repopulate it when a DOM node actually (re)mounts, so calling it
+  // on a render where the list didn't really change (starting with mount,
+  // where the refs just measured real heights synchronously during commit)
+  // pins every already-mounted row back to the estimate with no resize event
+  // left to correct it.
+  const filteredIdsRef = useRef<string | null>(null);
   useEffect(() => {
-    virtualizer.measure();
-  }, [filtered.length, virtualizer]);
+    const ids = filtered.map((m) => m.id).join("\u0000");
+    if (filteredIdsRef.current !== null && filteredIdsRef.current !== ids) {
+      virtualizer.measure();
+    }
+    filteredIdsRef.current = ids;
+  }, [filtered, virtualizer]);
 
   const toggleModel = (id: string) => {
     onChange(models.map((m) => (m.id === id ? { ...m, enabled: m.enabled === false } : m)));

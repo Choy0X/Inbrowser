@@ -3,27 +3,26 @@ import { reduceArtifactEvent, type ArtifactStreamEvent } from "./artifacts";
 
 /**
  * Fallback for models that ignore the <fachoy-artifact> tag contract
- * (artifacts.ts) and just dump a big file in an ordinary ``` fenced code
- * block instead — common on weaker/free models. Two problems that causes:
- * it never shows up as a viewable/downloadable file card, and
- * react-syntax-highlighter re-highlighting a multi-KB block on every single
- * streamed token (Markdown.tsx) makes the whole page grind to a halt.
+ * (artifacts.ts) and just dump a file in an ordinary ``` fenced code block
+ * instead — common on weaker/free models. Left as inline prose, that never
+ * shows up as a viewable/downloadable file card.
  *
  * This runs as a second stage on the plain prose text the tag-based parser
  * already produced (artifacts.ts's `prose` output), operating line-by-line
- * since fences are inherently line-delimited. A short fenced block (under
- * PROMOTE_THRESHOLD chars of body) is left completely alone — it streams
- * through as normal prose exactly like today, unaffected. Only once a
- * still-open fence's body crosses the threshold does it get "promoted":
+ * since fences are inherently line-delimited. Every fenced block promotes:
+ * as soon as a fence's first line of real content arrives, it's "promoted" —
  * synthesized start/chunk/end events (same shape as artifacts.ts's, so they
  * feed the same reduceArtifactEvent/ArtifactBlock/ArtifactPanel UI), and the
- * raw text stops being appended to the visible message content at all —
- * nothing that big ever reaches the markdown/syntax-highlighter pipeline.
+ * raw text stops being appended to the visible message content at all. Only
+ * a truly empty fence (closed before any content line) is left as literal
+ * prose — there's nothing to promote. See inlineCodeFile.ts's InlineCodeFile,
+ * which used to render every fenced block below a size threshold as a small
+ * in-bubble card; now it's a safety net for stored history and edge cases
+ * only, never the live path for a fresh message.
  */
 
 const FENCE_OPEN_RE = /^```(\S*)[ \t]*$/;
 const FENCE_CLOSE_RE = /^```[ \t]*$/;
-const PROMOTE_THRESHOLD = 600;
 
 const LANG_TO_TYPE: Record<string, { type: ArtifactType; ext: string }> = {
   html: { type: "html", ext: "html" },
@@ -75,7 +74,15 @@ export function classify(lang: string, body: string): { type: ArtifactType; lang
   return { type: "code", language: key, ext: ext || "txt" };
 }
 
-type Mode = "prose" | "fenceBuffering" | "fencePromoted";
+type Mode = "prose" | "fenceBuffering" | "fencePromoted" | "fenceLiteral";
+
+/** A model that fences its whole <fachoy-artifact> tag despite the contract
+ *  saying not to (artifactRecovery.ts's recoverFencedArtifactMessage handles
+ *  this after the stream ends, using the tag's own type/title attributes,
+ *  which generic promotion can't see) - never promote that fence generically,
+ *  or the message ends up with a mis-typed "code" file and recovery bails
+ *  out because `files` is already non-empty. */
+const ARTIFACT_TAG_RE = /^<fachoy-artifact\s/i;
 
 interface PushResult {
   prose: string;
@@ -86,7 +93,6 @@ export function createFencedCodeArtifactParser() {
   let mode: Mode = "prose";
   let pending = "";
   let fenceLang = "";
-  let fenceBody = "";
   let promotedId = "";
   let counter = 0;
 
@@ -120,7 +126,6 @@ export function createFencedCodeArtifactParser() {
         if (m) {
           mode = "fenceBuffering";
           fenceLang = m[1] ?? "";
-          fenceBody = "";
         } else {
           prose += line;
         }
@@ -129,23 +134,32 @@ export function createFencedCodeArtifactParser() {
 
       if (mode === "fenceBuffering") {
         if (FENCE_CLOSE_RE.test(bare)) {
-          // Small fence — replay it exactly as written, unchanged, as normal prose.
-          prose += "```" + fenceLang + "\n" + fenceBody + "```\n";
+          // Empty fence — nothing to promote; replay it exactly as written.
+          prose += "```" + fenceLang + "\n```\n";
           mode = "prose";
-          fenceBody = "";
           continue;
         }
-        fenceBody += line;
-        if (fenceBody.length > PROMOTE_THRESHOLD) {
-          counter += 1;
-          const { type, language, ext } = classify(fenceLang, fenceBody);
-          promotedId = `fallback-${counter}`;
-          const title = `generated-${counter}.${ext}`;
-          events.push({ kind: "start", id: promotedId, type, language, title });
-          events.push({ kind: "chunk", id: promotedId, value: fenceBody });
-          mode = "fencePromoted";
-          fenceBody = "";
+        if (ARTIFACT_TAG_RE.test(bare)) {
+          // Leave the whole thing as literal prose for recoverFencedArtifactMessage.
+          prose += "```" + fenceLang + "\n" + line;
+          mode = "fenceLiteral";
+          continue;
         }
+        // First line of real content — promote immediately rather than
+        // buffering further: every non-empty fence becomes a file artifact.
+        counter += 1;
+        const { type, language, ext } = classify(fenceLang, line);
+        promotedId = `fallback-${counter}`;
+        const title = `generated-${counter}.${ext}`;
+        events.push({ kind: "start", id: promotedId, type, language, title });
+        events.push({ kind: "chunk", id: promotedId, value: line });
+        mode = "fencePromoted";
+        continue;
+      }
+
+      if (mode === "fenceLiteral") {
+        prose += line;
+        if (FENCE_CLOSE_RE.test(bare)) mode = "prose";
         continue;
       }
 
@@ -174,11 +188,11 @@ export function createFencedCodeArtifactParser() {
       if (mode === "fencePromoted") {
         events.push({ kind: "end", id: promotedId, truncated: true });
       } else if (mode === "fenceBuffering") {
-        // Never closed and never crossed the threshold — show it as-is, same as today.
-        prose += "```" + fenceLang + "\n" + fenceBody;
+        // The stream ended right after the fence opened, with no content line
+        // yet — nothing was promoted; show the bare opening as-is.
+        prose += "```" + fenceLang + "\n";
       }
       mode = "prose";
-      fenceBody = "";
       promotedId = "";
       return { prose, events };
     },
@@ -189,7 +203,7 @@ export function createFencedCodeArtifactParser() {
  * Non-streaming counterpart to createFencedCodeArtifactParser(), for
  * one-shot migration of already-stored message content (see
  * messageMigrations.ts) — drives the exact same push/flush state machine in
- * one shot, so PROMOTE_THRESHOLD and classify() never diverge between the
+ * one shot, so promotion and classify() never diverge between the
  * live-streaming path and the migration path.
  */
 export function extractFencedArtifactsFromText(
