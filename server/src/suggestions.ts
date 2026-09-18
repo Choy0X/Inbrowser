@@ -245,7 +245,7 @@ const USER_PROMPT = `Write ${ASK_COUNT} varied starter prompts as the JSON array
 
 // ---------------------------------------------------------------- the store
 
-interface Store {
+export interface Store {
   /** UTC date of the last successful refresh. null until one lands. */
   dateKey: string | null;
   generatedAt: number;
@@ -494,6 +494,31 @@ export async function refresh(): Promise<void> {
 }
 
 /**
+ * The pool, for handing between processes.
+ *
+ * Under cluster the daily generation happens once, in the primary, and the
+ * result is broadcast - so `/v1/suggestions` answers identically whichever
+ * worker takes the request. Letting each worker run its own scheduler would
+ * mean N generations a day against the keyless providers AND N pools that
+ * disagree, which is the part a user would actually notice.
+ */
+export function getPoolSnapshot(): Store {
+  return store;
+}
+
+/**
+ * Installs a pool received from the primary.
+ *
+ * Ignores a snapshot with an empty pool rather than trusting it blindly: an
+ * empty pool would make the empty state render no cards at all, and the
+ * seeded CURATED store this replaces is always a better answer than nothing.
+ */
+export function setPoolSnapshot(next: Store): void {
+  if (!next || !Array.isArray(next.pool) || next.pool.length === 0) return;
+  store = next;
+}
+
+/**
  * Starts the daily refresh. Returns a stop function.
  *
  * An hourly tick that compares dates, rather than a setTimeout computed to fire
@@ -505,13 +530,17 @@ export async function refresh(): Promise<void> {
  * a no-network suite; without this the boot refresh would reach the internet
  * from inside it.
  */
-export function startSuggestionScheduler(env: NodeJS.ProcessEnv = process.env): () => void {
+export function startSuggestionScheduler(
+  env: NodeJS.ProcessEnv = process.env,
+  onRefresh?: (snapshot: Store) => void
+): () => void {
   if (env.SUGGESTIONS_DISABLED === "1") return () => {};
 
-  void refresh();
+  const announce = () => onRefresh?.(store);
+  void refresh().then(announce);
 
   const timer = setInterval(() => {
-    if (utcDateKey() !== store.dateKey) void refresh();
+    if (utcDateKey() !== store.dateKey) void refresh().then(announce);
   }, TICK_MS);
   // Never hold the process open. Same reason as the rate limiter's sweep.
   timer.unref();

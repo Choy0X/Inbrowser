@@ -49,12 +49,8 @@ import {
 } from "./forward.ts";
 import { openTunnel, TunnelError } from "./workerTunnel.ts";
 import { VERSION, type RelayConfig } from "./config.ts";
-import {
-  parseDayPart,
-  selectSuggestions,
-  startSuggestionScheduler,
-  type Capability,
-} from "./suggestions.ts";
+import { recordRejection, recordTtfb, recordTunnelClose, recordTunnelOpen } from "./metrics.ts";
+import { parseDayPart, selectSuggestions, type Capability } from "./suggestions.ts";
 
 /** Set on every response so the page is cross-origin isolated. */
 const ISOLATION_HEADERS: Record<string, string> = {
@@ -90,6 +86,40 @@ function createRateLimiter(perMinute: number) {
     }
     bucket.count += 1;
     return bucket.count > perMinute;
+  };
+}
+
+/**
+ * A bound on tunnels held open at once, per process.
+ *
+ * Without this the relay has no way to say no. Past what the box can carry it
+ * does not slow down, it runs out of memory and is killed - and with
+ * Restart=always that is a crash loop which drops every live stream on the
+ * box, repeatedly, rather than shedding the few requests that did not fit.
+ * A 503 the client can retry is strictly better than that for everyone.
+ *
+ * `tryAcquire` returns null when full, and otherwise a release function that is
+ * idempotent. Idempotence is the whole design: a leaked slot is capacity that
+ * never comes back and nothing anywhere reports it, so releasing twice must be
+ * harmless and every exit path can then release without checking whether some
+ * other path already did.
+ */
+function createTunnelSemaphore(limit: number) {
+  let held = 0;
+  return {
+    tryAcquire(): (() => void) | null {
+      if (limit > 0 && held >= limit) return null;
+      held++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        held--;
+      };
+    },
+    get inFlight() {
+      return held;
+    },
   };
 }
 
@@ -233,8 +263,9 @@ export function buildApp(config: RelayConfig): FastifyInstance {
   );
 
   const rateLimited = createRateLimiter(config.rateLimitPerMinute);
+  const tunnels = createTunnelSemaphore(config.maxInflightTunnels);
 
-  app.post("/v1/fetch", async (request, reply) => handleRelay(request, reply, config, rateLimited));
+  app.post("/v1/fetch", async (request, reply) => handleRelay(request, reply, config, rateLimited, tunnels));
 
   /**
    * Starter prompts for the chat empty state.
@@ -266,8 +297,11 @@ export function buildApp(config: RelayConfig): FastifyInstance {
       .send(selectSuggestions({ part: parseDayPart(query.part), caps }));
   });
 
-  startSuggestionScheduler();
-
+  // The scheduler is NOT started here. Under cluster it would run in every
+  // worker, which means N generations a day against the keyless providers and,
+  // worse, N pools that disagree - so /v1/suggestions would answer differently
+  // depending on which worker took the request. index.ts runs it once, in the
+  // primary, and broadcasts the result. See getPoolSnapshot in suggestions.ts.
   return app;
 }
 
@@ -275,11 +309,13 @@ async function handleRelay(
   request: FastifyRequest,
   reply: FastifyReply,
   config: RelayConfig,
-  rateLimited: (key: string) => boolean
+  rateLimited: (key: string) => boolean,
+  tunnels: { tryAcquire(): (() => void) | null }
 ): Promise<unknown> {
   const origin = request.headers.origin;
 
   if (config.allowedOrigins.length > 0 && origin && !config.allowedOrigins.includes(origin)) {
+    recordRejection("origin_not_allowed");
     return reply.code(403).send({ error: "Origin not allowed", code: "origin_not_allowed" });
   }
 
@@ -289,15 +325,18 @@ async function handleRelay(
     request.headers["cf-connecting-ip"] ?? request.socket.remoteAddress ?? "unknown"
   );
   if (rateLimited(clientKey)) {
+    recordRejection("rate_limited");
     return reply.code(429).send({ error: "Too many requests. Try again shortly.", code: "rate_limited" });
   }
 
   if (!config.workerUrl || !config.relaySecret) {
+    recordRejection("relay_not_configured");
     return reply.code(503).send({ error: "The relay is not configured.", code: "relay_not_configured" });
   }
 
   const declared = Number(request.headers["content-length"] ?? 0);
   if (declared > config.maxBodyBytes) {
+    recordRejection("body_too_large");
     return reply.code(413).send({ error: "Request body is too large.", code: "body_too_large" });
   }
 
@@ -305,6 +344,7 @@ async function handleRelay(
   try {
     meta = parseRelayMeta(request.headers["x-relay-meta"] as string | undefined);
   } catch (err) {
+    recordRejection("malformed_request");
     return reply
       .code(400)
       .send({ error: err instanceof EnvelopeError ? err.message : "Malformed request", code: "malformed_request" });
@@ -319,6 +359,23 @@ async function handleRelay(
   const rid = crypto.randomUUID();
   const tunnelStartedAt = Date.now();
 
+  // Admission control. Deliberately 503 rather than 429: 429 means "you sent
+  // too much" and this means "we have too much", and the distinction is not
+  // pedantic - freeProxyScan.ts keys a full 60s backoff on a 429, so a
+  // momentary capacity blip would stall a scan for a minute. A short
+  // Retry-After with its own code lets the client come back in seconds.
+  // 503 is also the edge-safe status for the same reason the tunnel-open
+  // failure below uses it.
+  const release = tunnels.tryAcquire();
+  if (!release) {
+    recordRejection("relay_at_capacity");
+    return reply
+      .header("Retry-After", "2")
+      .header("Cache-Control", "no-store")
+      .code(503)
+      .send({ error: "The relay is at capacity. Try again in a moment.", code: "relay_at_capacity" });
+  }
+
   let tunnel;
   try {
     tunnel = await openTunnel({
@@ -332,8 +389,10 @@ async function handleRelay(
   } catch (err) {
     // The Worker's own message reaches the user here: a proxy that answered
     // "407 rejected these credentials" says exactly that in Settings.
+    release();
     const message = err instanceof TunnelError ? err.message : "Could not open a tunnel to the proxy.";
     const code = err instanceof TunnelError ? err.publicCode : "tunnel_open_failed";
+    recordRejection(code as Parameters<typeof recordRejection>[0]);
     if (config.debugLog) {
       console.error(
         JSON.stringify({ evt: "relay_failure", site: "tunnel_open", rid, durationMs: Date.now() - tunnelStartedAt, message })
@@ -344,6 +403,19 @@ async function handleRelay(
     // the actionable JSON code. Real provider statuses are still mirrored below.
     return reply.header("Cache-Control", "no-store").code(503).send({ error: message, code });
   }
+
+  // From here the tunnel exists, so it must be accounted for exactly once on
+  // every path out. `release` is idempotent and `closeTunnel` wraps it with the
+  // matching gauge decrement, so each exit below can call it unconditionally
+  // without having to know whether another already did.
+  recordTunnelOpen(Date.now() - tunnelStartedAt);
+  let accounted = false;
+  const closeTunnel = () => {
+    if (accounted) return;
+    accounted = true;
+    recordTunnelClose();
+    release();
+  };
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
   // The content-type parser above handed back the untouched stream.
@@ -358,6 +430,8 @@ async function handleRelay(
     // upstream status and header set and must not have Fastify re-frame it. A
     // regression here looks like "streaming chat became a long pause", which is
     // exactly the failure worth being conservative about.
+    recordTtfb(Date.now() - forwardStartedAt);
+
     reply.hijack();
     const raw = reply.raw;
     raw.writeHead(result.status, {
@@ -372,10 +446,12 @@ async function handleRelay(
     raw.on("close", () => {
       (result.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
       tunnel.destroy();
+      closeTunnel();
     });
     return reply;
   } catch (err) {
     tunnel.destroy();
+    closeTunnel();
     if (reply.sent || reply.raw.headersSent) {
       reply.raw.destroy();
       return reply;
@@ -409,6 +485,7 @@ async function handleRelay(
         );
       }
     }
+    recordRejection(code as Parameters<typeof recordRejection>[0]);
     // Same edge-safe status as a tunnel-open failure; see the catch above.
     return reply.header("Cache-Control", "no-store").code(503).send({ error: message, code });
   }

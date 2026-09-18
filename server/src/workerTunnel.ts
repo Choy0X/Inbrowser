@@ -13,11 +13,19 @@
  * nest one TLS session inside another, but nothing here is being asked to: each
  * runtime does exactly one.
  *
- * Uses the WebSocket global, which Node exposes from v22 - the relay has no
- * runtime dependencies at all, deliberately, since this is the one component
- * that handles plaintext.
+ * Uses `ws` rather than Node's global WebSocket, and that is the whole reason
+ * this file has a dependency at all. The global (undici's) exposes no way to
+ * stop reading: there is no pause, and no signal that a send has reached the
+ * socket. Without those, a fast provider and a slow browser means bytes pile
+ * up in this process with nothing to bound them but the per-tunnel byte cap at
+ * the far end. `ws.pause()` reaches through to `socket.pause()`, and
+ * `ws.send()`'s callback fires when the bytes have been handed to the socket,
+ * which together are enough to make the whole path backpressure properly - see
+ * duplexFromWebSocket below.
  */
 import { Duplex } from "node:stream";
+import WebSocket from "ws";
+import { recordStall } from "./metrics.ts";
 import { deriveDialKey, newNonce, sealDial } from "./crypto.ts";
 import { decodeControlFrame, relayCloseCode, relayCloseMessage, type DialRequest } from "./protocol.ts";
 import type { RelayProxy } from "./envelope.ts";
@@ -29,6 +37,7 @@ export const TUNNEL_ERROR_CODES = {
   UNREADABLE_REPLY: "relay_reply_unreadable",
   UNRECOGNISED_REPLY: "relay_reply_unrecognised",
   CONNECTION_FAILED: "relay_connection_failed",
+  STALLED: "tunnel_stalled",
 } as const;
 
 export class TunnelError extends Error {
@@ -104,7 +113,20 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
   };
   const frame = await sealDial(key, dial);
 
-  const ws = new WebSocket(workerUrl);
+  const ws = new WebSocket(workerUrl, {
+    // The Worker sets no_web_socket_compression, and every byte here is either
+    // a sealed dial or somebody else's TLS session - already high entropy, so
+    // compression would only cost CPU.
+    perMessageDeflate: false,
+    // Default is 100 MiB. Nothing legitimate on this socket exceeds the
+    // Worker's own 64 KiB chunking, so a frame far above that is a bug or an
+    // attempt at one, and refusing it early bounds what a single frame can
+    // make this process allocate.
+    maxPayload: 1024 * 1024,
+    handshakeTimeout: 10_000,
+    // Binary only; UTF-8 validation would be wasted work on every frame.
+    skipUTF8Validation: true,
+  });
   ws.binaryType = "arraybuffer";
 
   return new Promise<Duplex>((resolve, reject) => {
@@ -143,11 +165,11 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
       }
     };
 
-    ws.addEventListener("open", () => {
-      ws.send(frame);
+    ws.on("open", () => {
+      ws.send(frame, { binary: true });
     });
 
-    ws.addEventListener("error", () => {
+    ws.on("error", () => {
       finish(
         new TunnelError("Could not reach the relay.", undefined, TUNNEL_ERROR_CODES.RELAY_UNREACHABLE),
         undefined,
@@ -155,19 +177,19 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
       );
     });
 
-    ws.addEventListener("close", (event) => {
+    ws.on("close", (code: number) => {
       // A close before READY is the Worker refusing the dial. After READY the
       // duplex owns the socket and handles close itself.
-      finish(new TunnelError(relayCloseMessage(event.code), event.code), undefined, "ws_close_pre_ready");
+      finish(new TunnelError(relayCloseMessage(code), code), undefined, "ws_close_pre_ready");
     });
 
     // The first message is the control frame; everything after it is tunnel
     // data, handled by the duplex below.
-    const onControl = (event: MessageEvent) => {
-      ws.removeEventListener("message", onControl as EventListener);
+    const onControl = (data: WebSocket.RawData) => {
+      ws.off("message", onControl);
       let frameBytes: Uint8Array;
       try {
-        frameBytes = new Uint8Array(event.data as ArrayBuffer);
+        frameBytes = toBuffer(data);
       } catch {
         finish(
           new TunnelError("The relay sent an unreadable reply.", undefined, TUNNEL_ERROR_CODES.UNREADABLE_REPLY),
@@ -196,8 +218,21 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
       finish(null, duplexFromWebSocket(ws, debugLog, requestId));
     };
 
-    ws.addEventListener("message", onControl as EventListener);
+    ws.on("message", onControl);
   });
+}
+
+/**
+ * `ws` hands a message over as a Buffer, an array of Buffers (a fragmented
+ * message) or an ArrayBuffer, depending on how it arrived. Concatenating a
+ * fragmented message rather than pushing the pieces is not optional: a caller
+ * reading a control frame needs the whole frame, and the tunnel needs the
+ * bytes in order with no gaps.
+ */
+function toBuffer(data: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.from(data as ArrayBuffer);
 }
 
 /**
@@ -217,26 +252,86 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
  */
 const MAX_WS_CHUNK_BYTES = 512 * 1024;
 
+/**
+ * How long the readable side may sit over its high-water mark, with the socket
+ * paused, before the tunnel is given up on. Under the Worker's 60s idle cap and
+ * well under forward.ts's 120s request timeout, so a genuinely stuck consumer
+ * is named here rather than surfacing later as a generic timeout.
+ */
+const STALL_LIMIT_MS = 20_000;
+
+/** How often the stall deadline is checked. Coarse on purpose - it is a deadline, not a measurement. */
+const STALL_CHECK_MS = 2_000;
+
 function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: string): Duplex {
+  /** True while we have told `ws` to stop reading its socket. */
+  let paused = false;
+  /** When the readable side first went over its high-water mark, or 0. */
+  let overSince = 0;
+
   const duplex = new Duplex({
-    // Data is pushed as it arrives rather than pulled. There is no usable
-    // backpressure signal on a WebSocket in either direction, so the relay
-    // bounds memory with request caps instead of flow control.
-    read() {},
-    write(chunk: Buffer, _encoding, callback) {
-      try {
-        if (chunk.length <= MAX_WS_CHUNK_BYTES) {
-          ws.send(chunk);
-        } else {
-          for (let offset = 0; offset < chunk.length; offset += MAX_WS_CHUNK_BYTES) {
-            ws.send(chunk.subarray(offset, offset + MAX_WS_CHUNK_BYTES));
-          }
-        }
-        callback();
-      } catch (err) {
-        callback(err as Error);
+    // 64 KiB rather than something more generous, and the arithmetic is the
+    // argument: this bound is paid per concurrent tunnel, so at the
+    // concurrency this is sized for, 256 KiB would be three quarters of a
+    // gigabyte of worst-case buffering and 64 KiB is under two hundred
+    // megabytes. Streamed replies arrive in chunks far smaller than either, so
+    // in the normal case the mark is never reached at all.
+    readableHighWaterMark: 64 * 1024,
+    writableHighWaterMark: 64 * 1024,
+
+    /**
+     * Called when the consumer wants more. If we stopped reading the socket
+     * because it had got ahead, this is the signal to start again.
+     */
+    read() {
+      overSince = 0;
+      if (paused) {
+        paused = false;
+        ws.resume();
       }
     },
+
+    /**
+     * The entire outbound half of the flow control is the placement of
+     * `callback`. Passing it to `ws.send` instead of calling it immediately
+     * means Node will not hand us another chunk until these bytes have reached
+     * the socket - and because `_write` is not re-entered before `callback`,
+     * ordering stops depending on `ws`'s internal queue and becomes a property
+     * of the stream itself.
+     *
+     * That one change propagates the whole way back: the provider's TLS socket
+     * stops draining, `ClientRequest` stops accepting, `body.pipe(request)`
+     * pauses, Fastify stops reading the incoming request, and Caddy
+     * backpressures the browser's upload.
+     */
+    write(chunk: Buffer, _encoding, callback) {
+      if (ws.readyState !== WebSocket.OPEN) {
+        callback(new TunnelError("The relay connection failed.", undefined, TUNNEL_ERROR_CODES.CONNECTION_FAILED));
+        return;
+      }
+      const pieces: Buffer[] = [];
+      if (chunk.length <= MAX_WS_CHUNK_BYTES) {
+        pieces.push(chunk);
+      } else {
+        for (let offset = 0; offset < chunk.length; offset += MAX_WS_CHUNK_BYTES) {
+          pieces.push(chunk.subarray(offset, offset + MAX_WS_CHUNK_BYTES));
+        }
+      }
+      let pending = pieces.length;
+      let failed = false;
+      for (const piece of pieces) {
+        ws.send(piece, { binary: true }, (err) => {
+          if (failed) return;
+          if (err) {
+            failed = true;
+            callback(err);
+            return;
+          }
+          if (--pending === 0) callback();
+        });
+      }
+    },
+
     final(callback) {
       try {
         ws.close(1000);
@@ -245,7 +340,9 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
       }
       callback();
     },
+
     destroy(err, callback) {
+      clearInterval(stallTimer);
       try {
         ws.close();
       } catch {
@@ -255,16 +352,39 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
     },
   });
 
-  ws.addEventListener("message", (event) => {
-    const data = event.data;
-    const buf =
-      data instanceof ArrayBuffer
-        ? Buffer.from(data)
-        : typeof data === "string"
-          ? Buffer.from(data, "utf8")
-          : Buffer.from(data as unknown as Uint8Array);
-    duplex.push(buf);
+  ws.on("message", (data: WebSocket.RawData) => {
+    const buf = toBuffer(data);
+    // push() returning false means the consumer is behind. Honouring it by
+    // pausing the socket is the inbound half: the kernel receive buffer fills,
+    // the TCP window closes, and the Worker's own send stops draining.
+    if (!duplex.push(buf) && !paused) {
+      paused = true;
+      overSince = overSince || Date.now();
+      ws.pause();
+    }
   });
+
+  /**
+   * A consumer that never resumes.
+   *
+   * Flow control alone converts "buffer without bound here" into "stop reading
+   * and hold the tunnel open forever", which is better but still not good: the
+   * bytes then queue in the Worker instead, and a Worker isolate's memory is
+   * shared with every other tunnel that happens to live in it. One browser
+   * that stops reading could take out unrelated tunnels. Dropping our own
+   * tunnel is the only thing this side can do about it, so it does that.
+   *
+   * The deadline sits under the Worker's 60s idle cap and well under
+   * forward.ts's 120s, so this fires first and the failure has a name.
+   */
+  const stallTimer = setInterval(() => {
+    if (!paused || overSince === 0) return;
+    if (Date.now() - overSince < STALL_LIMIT_MS) return;
+    clearInterval(stallTimer);
+    recordStall();
+    fail(new TunnelError("The connection stalled and was closed.", undefined, TUNNEL_ERROR_CODES.STALLED));
+  }, STALL_CHECK_MS);
+  stallTimer.unref();
 
   /**
    * A transport error can arrive after the consumer is gone - the response has
@@ -281,16 +401,37 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
     if (!duplex.destroyed) duplex.destroy(err);
   };
 
-  ws.addEventListener("close", (event) => {
-    if (event.code !== 1000 && event.code >= 4000) {
-      logTunnelFail(debugLog, requestId, "post_ready_close", event.code);
-      fail(new TunnelError(relayCloseMessage(event.code), event.code));
+  /**
+   * Three outcomes, and the middle one is easy to get wrong.
+   *
+   *   >= 4000  the Worker closing deliberately, with a reason worth keeping.
+   *   1000/1005 a normal close: the peer is finished, so EOF the readable side.
+   *   anything else - 1001, and above all 1006 - the connection dropped.
+   *
+   * 1006 is what arrives when the far end goes away without a close frame, and
+   * it must NOT be treated as a clean EOF: pushing null there tells the HTTP
+   * client the response ended normally, so a truncated reply is reported as a
+   * generic provider failure instead of as the transport failure it is. The
+   * `ws` client surfaces this where the old global WebSocket raised an error
+   * event, which is why this distinction has to be made explicitly here.
+   */
+  ws.on("close", (code: number) => {
+    clearInterval(stallTimer);
+    if (code >= 4000) {
+      logTunnelFail(debugLog, requestId, "post_ready_close", code);
+      fail(new TunnelError(relayCloseMessage(code), code));
+      return;
+    }
+    if (code !== 1000 && code !== 1005) {
+      logTunnelFail(debugLog, requestId, "post_ready_abnormal_close", code);
+      fail(new TunnelError("The relay connection failed.", undefined, TUNNEL_ERROR_CODES.CONNECTION_FAILED));
       return;
     }
     if (!duplex.destroyed) duplex.push(null);
   });
 
-  ws.addEventListener("error", () => {
+  ws.on("error", () => {
+    clearInterval(stallTimer);
     logTunnelFail(debugLog, requestId, "post_ready_ws_error");
     fail(new TunnelError("The relay connection failed.", undefined, TUNNEL_ERROR_CODES.CONNECTION_FAILED));
   });

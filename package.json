@@ -80,7 +80,8 @@
     "unified": "^11.0.5",
     "wasi-sh": "^0.11.0",
     "wasmoon": "^1.16.0",
-    "webr": "^0.6.0"
+    "webr": "^0.6.0",
+    "ws": "8.21.3"
   },
   "devDependencies": {
     "@fontsource-variable/inter": "^5.2.8",
@@ -90,6 +91,7 @@
     "@types/react-dom": "^18.3.7",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/sql.js": "^1.4.11",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.5.4",
     "fake-indexeddb": "^6.2.5",

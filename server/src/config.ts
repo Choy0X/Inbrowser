@@ -50,6 +50,22 @@ export interface RelayConfig {
    * nothing" claim in the normal case.
    */
   debugLog: boolean;
+  /**
+   * Port for the aggregate-counter listener, or 0 for off (the default).
+   * Always bound to 127.0.0.1 - see metricsServer.ts. Off by default so a
+   * self-hoster copying the systemd unit gets the same one-port process the
+   * deploy docs describe.
+   */
+  metricsPort: number;
+  /**
+   * Tunnels this process will hold open at once before answering 503
+   * `relay_at_capacity`. Per cluster worker, not per box. 0 means unbounded,
+   * which is the pre-admission-control behaviour and is not recommended
+   * anywhere a real user can reach.
+   */
+  maxInflightTunnels: number;
+  /** Cluster workers to fork. 1 runs everything in one process, as before. */
+  clusterWorkers: number;
 }
 
 /**
@@ -70,6 +86,9 @@ interface ServerSection {
   maxBodyBytes?: number;
   rateLimitPerMinute?: number;
   distDir?: string;
+  metricsPort?: number;
+  maxInflightTunnels?: number;
+  clusterWorkers?: number;
 }
 
 function readServerSection(): ServerSection {
@@ -106,6 +125,18 @@ function readAppDomain(): string {
 function intFrom(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Like intFrom, but accepts zero. Several settings below use 0 to mean "off"
+ * or "unbounded", which intFrom would silently discard in favour of the
+ * default - turning `METRICS_PORT=0` into "use the configured port" rather
+ * than "do not listen".
+ */
+function countFrom(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 /**
@@ -153,6 +184,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     dev,
     domain: env.APP_DOMAIN || readAppDomain(),
     debugLog: env.RELAY_DEBUG_LOG === "1",
+    // intFrom() refuses zero and negatives, so these three take their own
+    // parse: 0 is meaningful for two of them (off / unbounded) rather than
+    // being a rejected value that falls back to the default.
+    metricsPort: countFrom(env.METRICS_PORT, file.metricsPort ?? 0),
+    maxInflightTunnels: countFrom(env.MAX_INFLIGHT_TUNNELS, file.maxInflightTunnels ?? 750),
+    clusterWorkers: countFrom(env.CLUSTER_WORKERS, file.clusterWorkers ?? 1),
   };
 }
 
