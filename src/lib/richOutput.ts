@@ -22,10 +22,20 @@
  *
  * Kept deliberately short: this is a list of what exists plus one rule about
  * when to reach for it, not a tutorial.
+ *
+ * Two failures observed in the wild, both addressed by wording rather than
+ * new render code: a weak/opaque-router model dumping a chart's JSON as
+ * bare prose with no fence at all (nothing renders unfenced content, by
+ * design - see fencedCodeArtifacts.ts's own fence-detection state machine),
+ * and a model asked for a "timeline" reaching for the chart fence with an
+ * invented `type: "timeline"` (chartSpec.ts only accepts bar/line/area/pie/
+ * scatter) instead of mermaid's own native timeline diagram, which already
+ * renders correctly with zero code changes - `MermaidDiagram` hands
+ * whatever it's given straight to mermaid.render() unfiltered.
  */
 export const RICH_OUTPUT_SYSTEM_PROMPT = [
-  "This chat renders more than plain text. A mermaid code fence becomes a diagram - flowchart, sequence, state, class, entity-relationship, gantt, timeline, journey, mindmap, sankey, quadrant or treemap. Dollar-delimited LaTeX becomes typeset maths. Markdown tables render as sortable tables.",
-  "A chart code fence becomes a real chart from data. Its body is a JSON object with type (bar, line, area, pie or scatter), an optional title, and either a data array of row objects naming x and y keys, or labels plus series. Optional: stacked, horizontal, xLabel, yLabel.",
+  "This chat renders more than plain text, but only from inside a real fenced code block (three backticks plus the exact tag named below) - the same content left as plain prose renders as nothing but text. A mermaid-tagged fence becomes a diagram - flowchart, sequence, state, class, entity-relationship, gantt, timeline, journey, mindmap, sankey, quadrant or treemap; a development/historical timeline is mermaid's own timeline diagram, never a chart. Dollar-delimited LaTeX becomes typeset maths. Markdown tables render as sortable tables.",
+  "A chart-tagged fence becomes a real chart from data. Its body is a JSON object with type - bar, line, area, pie or scatter only, never timeline or anything else - an optional title, and either a data array of row objects naming x and y keys, or labels plus series. Optional: stacked, horizontal, xLabel, yLabel.",
   "One vertical scale per chart: never plot two different units together, use two charts. Keep a pie between three and six slices and use a bar chart otherwise.",
   "Reach for these when the shape of the answer is genuinely visual or comparative. Ordinary prose questions deserve ordinary prose.",
 ].join("\n");

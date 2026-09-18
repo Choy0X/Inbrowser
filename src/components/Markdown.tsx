@@ -9,6 +9,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import type { SearchResult } from "../lib/types";
 import { normalizeCitationMarkers } from "../lib/citations";
 import { normalizeMathDelimiters } from "../lib/mathDelimiters";
+import { wrapBareChartParagraphs } from "../lib/charts/bareChartText";
 import { flattenNode } from "../lib/flattenNode";
 import { codeFileEligible, inlineCodeKey } from "../lib/inlineCodeFile";
 import { ChartBlock } from "./ChartBlock";
@@ -376,6 +377,15 @@ function BaseMarkdown({
   const hasMath = HAS_DOLLAR_MATH_RE.test(normalized);
   const hasMathHint = HAS_MATH_HINT_RE.test(text);
 
+  // Chat only (interactiveCode): rescue a chart whose model skipped the
+  // ```chart fence and pasted the JSON as a bare paragraph instead - see
+  // wrapBareChartParagraphs's own doc comment for why this must run on the
+  // raw source rather than on already-parsed markdown nodes.
+  const rendered = useMemo(
+    () => (interactiveCode ? wrapBareChartParagraphs(normalized) : normalized),
+    [normalized, interactiveCode]
+  );
+
   const [mathPlugins, setMathPlugins] = useState<{
     remarkMath: typeof RemarkMath;
     rehypeKatex: typeof RehypeKatex;
@@ -405,7 +415,7 @@ function BaseMarkdown({
     ...(cited ? [rehypeCitations] : []),
   ];
   // Rebuilt from the text, so every block keeps its number across re-renders.
-  const indexBlock = useMemo(() => createBlockIndexer(), [normalized]);
+  const indexBlock = useMemo(() => createBlockIndexer(), [rendered]);
 
   const codeEdits = interactive?.codeEdits;
   const onEditCodeBlock = interactive?.onEditCodeBlock;
@@ -443,7 +453,7 @@ function BaseMarkdown({
 
   return (
     <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
-      {normalized}
+      {rendered}
     </ReactMarkdown>
   );
 }

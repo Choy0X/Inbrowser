@@ -1,4 +1,4 @@
-import { classify } from "./fencedCodeArtifacts";
+import { classify, NON_FILE_LANGS } from "./fencedCodeArtifacts";
 
 /**
  * Identity, naming and eligibility for the interactive code blocks rendered
@@ -11,11 +11,10 @@ import { classify } from "./fencedCodeArtifacts";
  * before that parser existed, or a fence in a context that never runs through
  * it at all. These helpers let the markdown renderer treat one as a small
  * file instead - runnable, editable, downloadable - without duplicating the
- * naming rules the artifact path already owns.
+ * naming rules the artifact path already owns. `NON_FILE_LANGS` itself now
+ * also lives there (fencedCodeArtifacts.ts), as the single source of which
+ * fence languages never become a file, live or stored.
  */
-
-/** Fences that already have their own renderer and must never become a file. */
-const NON_FILE_LANGS = new Set(["mermaid", "latex", "tex", "math", "chart"]);
 
 /**
  * Whether a fenced block should render as an interactive file.

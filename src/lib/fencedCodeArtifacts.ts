@@ -13,12 +13,18 @@ import { reduceArtifactEvent, type ArtifactStreamEvent } from "./artifacts";
  * as soon as a fence's first line of real content arrives, it's "promoted" —
  * synthesized start/chunk/end events (same shape as artifacts.ts's, so they
  * feed the same reduceArtifactEvent/ArtifactBlock/ArtifactPanel UI), and the
- * raw text stops being appended to the visible message content at all. Only
- * a truly empty fence (closed before any content line) is left as literal
- * prose — there's nothing to promote. See inlineCodeFile.ts's InlineCodeFile,
- * which used to render every fenced block below a size threshold as a small
- * in-bubble card; now it's a safety net for stored history and edge cases
- * only, never the live path for a fresh message.
+ * raw text stops being appended to the visible message content at all.
+ *
+ * Two exceptions stay as literal prose instead of promoting: a truly empty
+ * fence (closed before any content line, nothing to promote), and a fence
+ * tagged with a language in NON_FILE_LANGS (mermaid, latex, tex, math,
+ * chart) — those already have a dedicated live renderer in Markdown.tsx
+ * (MermaidDiagram/LatexBlock/ChartBlock), and ArtifactPanel.tsx has no
+ * preview for them, so promoting would strand them as raw/syntax-
+ * highlighted text with no way back. See inlineCodeFile.ts's
+ * InlineCodeFile, which used to render every fenced block below a size
+ * threshold as a small in-bubble card; now it's a safety net for stored
+ * history and edge cases only, never the live path for a fresh message.
  */
 
 const FENCE_OPEN_RE = /^```(\S*)[ \t]*$/;
@@ -31,6 +37,13 @@ const LANG_TO_TYPE: Record<string, { type: ArtifactType; ext: string }> = {
   markdown: { type: "markdown", ext: "md" },
   md: { type: "markdown", ext: "md" },
 };
+
+/** Fence languages that already have a dedicated live renderer in
+ *  Markdown.tsx (MermaidDiagram/LatexBlock/ChartBlock) and must never be
+ *  promoted into a generic file artifact — see inlineCodeFile.ts's
+ *  codeFileEligible(), which uses this same set for the post-fallback
+ *  "should this render as a small file card" decision. */
+export const NON_FILE_LANGS = new Set(["mermaid", "latex", "tex", "math", "chart"]);
 
 const EXT_ALIASES: Record<string, string> = {
   javascript: "js",
@@ -145,8 +158,17 @@ export function createFencedCodeArtifactParser() {
           mode = "fenceLiteral";
           continue;
         }
+        if (NON_FILE_LANGS.has(fenceLang.toLowerCase())) {
+          // Already has a dedicated live renderer in Markdown.tsx — never
+          // promote into a generic file artifact; replay as literal prose
+          // so it reaches Markdown.tsx unchanged.
+          prose += "```" + fenceLang + "\n" + line;
+          mode = "fenceLiteral";
+          continue;
+        }
         // First line of real content — promote immediately rather than
-        // buffering further: every non-empty fence becomes a file artifact.
+        // buffering further: every non-empty fence becomes a file artifact,
+        // except the NON_FILE_LANGS carve-out above.
         counter += 1;
         const { type, language, ext } = classify(fenceLang, line);
         promotedId = `fallback-${counter}`;
