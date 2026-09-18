@@ -29,6 +29,8 @@ import { reduceArtifactEvent, type ArtifactStreamEvent } from "./artifacts";
 
 const FENCE_OPEN_RE = /^```(\S*)[ \t]*$/;
 const FENCE_CLOSE_RE = /^```[ \t]*$/;
+/** The marker both regexes above are anchored on. */
+const FENCE = "```";
 
 const LANG_TO_TYPE: Record<string, { type: ArtifactType; ext: string }> = {
   html: { type: "html", ext: "html" },
@@ -108,6 +110,15 @@ export function createFencedCodeArtifactParser() {
   let fenceLang = "";
   let promotedId = "";
   let counter = 0;
+  /**
+   * True when part of the current line has already been emitted as prose.
+   *
+   * Once that has happened the rest of that line cannot be a fence marker, so
+   * it must not be re-tested as one - otherwise "Hello" followed by a delta of
+   * three backticks would be read as an opening fence when the real line is
+   * "Hello" followed by them mid-sentence.
+   */
+  let midLine = false;
 
   /** Splits complete (newline-terminated) lines off the front of `pending`; the rest stays buffered. */
   function takeLines(finalFlush: boolean): string[] {
@@ -133,9 +144,13 @@ export function createFencedCodeArtifactParser() {
 
     for (const line of lines) {
       const bare = line.endsWith("\n") ? line.slice(0, -1) : line;
+      // The tail of a line whose start already went out as prose. It cannot be
+      // a marker, whatever it looks like.
+      const continuation = midLine;
+      if (line.endsWith("\n") || finalFlush) midLine = false;
 
       if (mode === "prose") {
-        const m = FENCE_OPEN_RE.exec(bare);
+        const m = continuation ? null : FENCE_OPEN_RE.exec(bare);
         if (m) {
           mode = "fenceBuffering";
           fenceLang = m[1] ?? "";
@@ -181,7 +196,7 @@ export function createFencedCodeArtifactParser() {
 
       if (mode === "fenceLiteral") {
         prose += line;
-        if (FENCE_CLOSE_RE.test(bare)) mode = "prose";
+        if (!continuation && FENCE_CLOSE_RE.test(bare)) mode = "prose";
         continue;
       }
 
@@ -195,7 +210,33 @@ export function createFencedCodeArtifactParser() {
       events.push({ kind: "chunk", id: promotedId, value: line });
     }
 
+    // Release the trailing partial line when it cannot still become a marker.
+    //
+    // Without this, nothing reaches the chat until a newline arrives - and a
+    // model answering in prose emits none until the paragraph ends, so a
+    // one-paragraph answer appeared all at once when the turn finished rather
+    // than streaming token by token. Both fence regexes are anchored at a line
+    // start with no leading whitespace, so a partial line can only grow into a
+    // marker if it begins a line AND is either a prefix of the fence or
+    // already starts with it. Anything else is ordinary prose and can go now.
+    //
+    // Only in the two modes whose output IS chat text. fenceBuffering and
+    // fencePromoted emit artifact events keyed on whole lines, and holding a
+    // partial line back there is correct.
+    if (!finalFlush && pending && (mode === "prose" || mode === "fenceLiteral")) {
+      if (midLine || !couldStartMarker(pending)) {
+        prose += pending;
+        pending = "";
+        midLine = true;
+      }
+    }
+
     return { prose, events };
+  }
+
+  /** Whether a partial line at a line start could still become a fence marker. */
+  function couldStartMarker(partial: string): boolean {
+    return FENCE.startsWith(partial) || partial.startsWith(FENCE);
   }
 
   return {
@@ -216,6 +257,7 @@ export function createFencedCodeArtifactParser() {
       }
       mode = "prose";
       promotedId = "";
+      midLine = false;
       return { prose, events };
     },
   };

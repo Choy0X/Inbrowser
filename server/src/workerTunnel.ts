@@ -14,14 +14,18 @@
  * runtime does exactly one.
  *
  * Uses `ws` rather than Node's global WebSocket, and that is the whole reason
- * this file has a dependency at all. The global (undici's) exposes no way to
- * stop reading: there is no pause, and no signal that a send has reached the
- * socket. Without those, a fast provider and a slow browser means bytes pile
- * up in this process with nothing to bound them but the per-tunnel byte cap at
- * the far end. `ws.pause()` reaches through to `socket.pause()`, and
- * `ws.send()`'s callback fires when the bytes have been handed to the socket,
- * which together are enough to make the whole path backpressure properly - see
- * duplexFromWebSocket below.
+ * this file has a dependency at all. The global (undici's) gives no signal that
+ * a send has reached the socket, so an upload had no backpressure: a browser
+ * could push a body in faster than the tunnel drained it and the excess piled
+ * up in this process. `ws.send()`'s callback fires when the bytes have been
+ * handed to the socket, which is what the write path below uses to hold the
+ * whole chain back - through TLS, the HTTP request, Fastify and out to Caddy.
+ *
+ * That is the OUTBOUND half only. `ws` can also stop reading, and an earlier
+ * version used that to backpressure the inbound half too; it was removed
+ * because it risks batching a streamed reply into one burst at the end. The
+ * note on `read()` in duplexFromWebSocket explains why, and is the thing to
+ * read before adding it back.
  */
 import { Duplex } from "node:stream";
 import WebSocket from "ws";
@@ -144,7 +148,13 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
     // Binary only; UTF-8 validation would be wasted work on every frame.
     skipUTF8Validation: true,
   });
-  ws.binaryType = "arraybuffer";
+  // Deliberately NOT binaryType = "arraybuffer". That was carried over from the
+  // global WebSocket, which had no other option, and it is a trap here: `ws`'s
+  // toArrayBuffer() hands back its own internal `buf.buffer` whenever the frame
+  // fills its backing store, and wrapping that in Buffer.from() makes a VIEW,
+  // not a copy - so a later frame can overwrite bytes we have already pushed
+  // but TLS has not yet read. The default, nodebuffer, gives a Buffer we can
+  // push straight through with no conversion and no aliasing.
 
   return new Promise<Duplex>((resolve, reject) => {
     let settled = false;
@@ -248,8 +258,11 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
  */
 function toBuffer(data: WebSocket.RawData): Buffer {
   if (Buffer.isBuffer(data)) return data;
+  // Only reachable for a fragmented message, where `ws` hands over the pieces.
   if (Array.isArray(data)) return Buffer.concat(data);
-  return Buffer.from(data as ArrayBuffer);
+  // Not expected with the default binaryType, but copying rather than viewing
+  // is the safe reading of an ArrayBuffer whose owner may reuse it.
+  return Buffer.from(new Uint8Array(data as ArrayBuffer));
 }
 
 /**
@@ -281,32 +294,29 @@ const STALL_LIMIT_MS = 20_000;
 const STALL_CHECK_MS = 2_000;
 
 function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: string): Duplex {
-  /** True while we have told `ws` to stop reading its socket. */
-  let paused = false;
-  /** When the readable side first went over its high-water mark, or 0. */
+  /** When the readable side first went over its watermark, or 0 while healthy. */
   let overSince = 0;
 
   const duplex = new Duplex({
-    // 64 KiB rather than something more generous, and the arithmetic is the
-    // argument: this bound is paid per concurrent tunnel, so at the
-    // concurrency this is sized for, 256 KiB would be three quarters of a
-    // gigabyte of worst-case buffering and 64 KiB is under two hundred
-    // megabytes. Streamed replies arrive in chunks far smaller than either, so
-    // in the normal case the mark is never reached at all.
-    readableHighWaterMark: 64 * 1024,
-    writableHighWaterMark: 64 * 1024,
-
     /**
-     * Called when the consumer wants more. If we stopped reading the socket
-     * because it had got ahead, this is the signal to start again.
+     * Nothing to do, and that is deliberate.
+     *
+     * An earlier version paused the WebSocket's socket whenever `push()`
+     * reported backpressure and resumed only from here, which is the textbook
+     * shape for a Duplex being pulled by a consumer. It is the wrong shape for
+     * THIS one: `tls.connect({ socket })` does not pull, it wraps the stream in
+     * Node's JSStreamSocket and drives it through 'data' with its own
+     * pause()/resume(), so whether this is re-entered promptly after a pause is
+     * not ours to determine. A streamed reply that arrives in one burst at the
+     * end instead of token by token is the single worst failure this component
+     * has, and it is not worth risking for flow control that only matters to a
+     * consumer which has stopped reading entirely - a case the stall deadline
+     * below already handles, without touching delivery of the healthy case.
+     *
+     * Do not reintroduce an inbound pause here without a test that proves
+     * arrivals stay spread across the response (verify-relay.ts has one).
      */
-    read() {
-      overSince = 0;
-      if (paused) {
-        paused = false;
-        ws.resume();
-      }
-    },
+    read() {},
 
     /**
      * The entire outbound half of the flow control is the placement of
@@ -370,14 +380,13 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
   });
 
   ws.on("message", (data: WebSocket.RawData) => {
-    const buf = toBuffer(data);
-    // push() returning false means the consumer is behind. Honouring it by
-    // pausing the socket is the inbound half: the kernel receive buffer fills,
-    // the TCP window closes, and the Worker's own send stops draining.
-    if (!duplex.push(buf) && !paused) {
-      paused = true;
-      overSince = overSince || Date.now();
-      ws.pause();
+    // Pushed unconditionally. push() returning false is recorded for the stall
+    // deadline below, but is NOT acted on by pausing the socket - see the note
+    // on read() above for why.
+    if (!duplex.push(toBuffer(data))) {
+      if (overSince === 0) overSince = Date.now();
+    } else {
+      overSince = 0;
     }
   });
 
@@ -395,7 +404,11 @@ function duplexFromWebSocket(ws: WebSocket, debugLog?: boolean, requestId?: stri
    * forward.ts's 120s, so this fires first and the failure has a name.
    */
   const stallTimer = setInterval(() => {
-    if (!paused || overSince === 0) return;
+    // Healthy again, or never unhealthy: the consumer has caught up.
+    if (overSince === 0 || duplex.readableLength === 0) {
+      overSince = 0;
+      return;
+    }
     if (Date.now() - overSince < STALL_LIMIT_MS) return;
     clearInterval(stallTimer);
     recordStall();
