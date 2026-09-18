@@ -50,18 +50,39 @@ export interface ScanOptions {
  */
 const PER_CHECK_TIMEOUT_MS = 12_000;
 
-// The relay's own per-IP rate limit is a fixed 60s window shared across ALL
-// relay traffic for this browser's IP (server/src/app.ts's createRateLimiter,
-// default 120/min) - not just this scan. Dead proxies (most of any public
-// list) fail in ~1-3s, so the worker pool below can otherwise sustain well
-// past that budget. MIN_REQUEST_INTERVAL_MS paces new checks (~75/min) well
-// under the default so a scan rarely trips it; RATE_LIMIT_BACKOFF_MS is what
-// a 429 still gets backed off by when it happens anyway (a lower configured
-// limit, or other concurrent relay traffic sharing the bucket) - a full
-// window, since the relay's bucket resets every 60s and there's no
-// Retry-After header to read instead.
+// Pacing, and why it adapts rather than being a constant.
+//
+// A scan is the most relay-hungry thing this app does: every candidate is a
+// full relay -> Worker -> proxy -> target round trip, and most public-list
+// proxies are dead and fail fast, so an unpaced pool sustains a request rate
+// far above anything a user's ordinary traffic produces.
+//
+// This used to restate the server's own per-minute limit here and pick a fixed
+// interval that sat under it, which duplicated a server constant in client
+// code and mispaced any deployment configured differently. The interval now
+// MOVES instead: every refusal widens it, a run of clean checks narrows it
+// again. That converges on whatever the relay will actually take, without
+// either side needing to know the other's numbers.
+//
+// The relay also now sends Retry-After on both refusal shapes, so a backoff
+// waits exactly as long as it was told to instead of assuming a full window.
 const MIN_REQUEST_INTERVAL_MS = 800;
+
+/** Ceiling on the adaptive interval, so a persistent refusal still makes progress. */
+const MAX_REQUEST_INTERVAL_MS = 5_000;
+
+/** Multiplicative increase on a refusal, gentle decrease on sustained success. */
+const PACE_WIDEN = 1.5;
+const PACE_NARROW = 0.9;
+
+/** Clean checks required before narrowing. */
+const PACE_NARROW_AFTER = 20;
+
+/** Fallback when a refusal arrives without Retry-After. A full window, as before. */
 const RATE_LIMIT_BACKOFF_MS = 60_000;
+
+/** Fallback for a capacity refusal, which is transient rather than a quota. */
+const CAPACITY_BACKOFF_MS = 2_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -77,6 +98,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
       }
     );
   });
+}
+
+/**
+ * Whether the relay refused us, as opposed to the proxy being dead.
+ *
+ * A 429 is its rate limit; a 503 carrying `relay_at_capacity` is it being
+ * full. Every other 503 is a genuine failure to reach the proxy or provider
+ * and must still count against that candidate, or a scan would never mark
+ * anything dead.
+ */
+function isRelayRefusal(outcome: CheckOutcome): boolean {
+  if (outcome.httpStatus === 429) return true;
+  return outcome.httpStatus === 503 && outcome.relayCode === "relay_at_capacity";
 }
 
 /** Resolves after `ms`, or immediately if `signal` aborts first. */
@@ -100,6 +134,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 interface CheckOutcome {
   result: FreeProxyCheckResult;
+  /** The relay's own `code`, when it refused rather than the proxy failing. */
+  relayCode?: string;
+  /** How long the relay asked us to wait, when it said. */
+  retryAfterMs?: number;
   /** The real relay HTTP status when the check reached it (0/undefined on a
    *  network error or timeout) - lets the caller tell "our own rate limit"
    *  apart from "this proxy is actually dead" without changing the public
@@ -119,6 +157,8 @@ async function checkOne(proxy: CustomProxy, relayUrl?: string, allowInsecureProx
       : {
           result: { proxy, status: "dead", error: result.error ?? `HTTP ${result.status}`, code: result.code },
           httpStatus: result.status,
+          relayCode: result.code,
+          retryAfterMs: result.retryAfterMs,
         };
   } catch (err) {
     return { result: { proxy, status: "dead", error: err instanceof Error ? err.message : String(err) } };
@@ -159,6 +199,9 @@ export async function* checkFreeProxyCandidates(
   // MIN_REQUEST_INTERVAL_MS/RATE_LIMIT_BACKOFF_MS comment above checkOne().
   let nextAllowedStart = 0;
   let backoffUntil = 0;
+  /** The adaptive interval. Widens on refusal, narrows on a run of successes. */
+  let paceMs = MIN_REQUEST_INTERVAL_MS;
+  let cleanRun = 0;
 
   const wake = () => {
     const n = notify;
@@ -177,7 +220,7 @@ export async function* checkFreeProxyCandidates(
       const now = Date.now();
       const readyAt = Math.max(nextAllowedStart, backoffUntil);
       if (now >= readyAt) {
-        nextAllowedStart = now + MIN_REQUEST_INTERVAL_MS;
+        nextAllowedStart = now + paceMs;
         return;
       }
       await sleep(readyAt - now, signal);
@@ -192,18 +235,29 @@ export async function* checkFreeProxyCandidates(
       const index = nextIndex++;
       if (index >= proxies.length) break;
       let outcome = await checkOne(proxies[index], relayUrl, allowInsecureProxyTls);
-      if (outcome.httpStatus === 429) {
-        // Our own relay's limiter, not this proxy's fault - pause the whole
+      if (isRelayRefusal(outcome)) {
+        // The relay refusing us, not this proxy failing - so pause the whole
         // pool (every worker's next reserveSlot() respects backoffUntil too)
-        // and give this exact candidate one retry rather than recording it
-        // as dead. Retried by this same worker, not requeued for any worker
-        // to pick up, so there's no chance of it being dropped if the pool
-        // is winding down.
-        backoffUntil = Math.max(backoffUntil, Date.now() + RATE_LIMIT_BACKOFF_MS);
+        // and give this exact candidate one retry rather than recording it as
+        // dead. Retried by this same worker, not requeued for any worker to
+        // pick up, so it cannot be dropped while the pool winds down.
+        //
+        // Two shapes, and they deserve different waits. A 429 is a quota and
+        // lasts until the window resets; a capacity 503 is transient and
+        // clears in seconds. Conflating them would stall a scan for a minute
+        // over a momentary blip, which is exactly why the relay answers 503
+        // rather than 429 when it is merely full.
+        const fallback = outcome.relayCode === "relay_at_capacity" ? CAPACITY_BACKOFF_MS : RATE_LIMIT_BACKOFF_MS;
+        backoffUntil = Math.max(backoffUntil, Date.now() + (outcome.retryAfterMs ?? fallback));
+        paceMs = Math.min(MAX_REQUEST_INTERVAL_MS, Math.round(paceMs * PACE_WIDEN));
+        cleanRun = 0;
         if (signal.aborted || stopped) break;
         await reserveSlot();
         if (signal.aborted || stopped) break;
         outcome = await checkOne(proxies[index], relayUrl, allowInsecureProxyTls);
+      } else if (paceMs > MIN_REQUEST_INTERVAL_MS && ++cleanRun >= PACE_NARROW_AFTER) {
+        cleanRun = 0;
+        paceMs = Math.max(MIN_REQUEST_INTERVAL_MS, Math.round(paceMs * PACE_NARROW));
       }
       const { result } = outcome;
       if (signal.aborted) break;

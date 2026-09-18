@@ -919,6 +919,10 @@ export interface ProxyTestResult {
   /** Present on failure when it came from the relay's structured JSON (see
    *  `GatewayError.code`), e.g. "provider_tls_unverified". */
   code?: string;
+  /** Present when the relay sent a `Retry-After` - on its own rate limit, or
+   *  when it is at capacity. Lets a caller wait exactly as long as it was
+   *  told to rather than assuming a window. */
+  retryAfterMs?: number;
 }
 
 /**
@@ -960,6 +964,7 @@ export async function testProxyConnection(proxy: CustomProxy, relayUrl?: string,
       latencyMs: Math.round(performance.now() - started),
       error: err instanceof Error ? err.message : String(err),
       code: err instanceof GatewayError ? err.code : undefined,
+      retryAfterMs: err instanceof GatewayError ? err.retryAfterMs : undefined,
     };
   }
 }

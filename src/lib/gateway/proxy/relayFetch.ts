@@ -143,10 +143,29 @@ export async function relayFetch(
   // way to the user instead of a bare status code.
   if (!response.ok) {
     const relayError = await readRelayError(response);
-    if (relayError) throw new GatewayError(response.status, relayError.error, false, undefined, relayError.code);
+    // The relay now says when to come back - a 429 carries the remainder of
+    // its own window, and a capacity 503 carries a couple of seconds. Reading
+    // it beats the caller assuming a full minute, which is what the proxy
+    // scanner used to have to do.
+    if (relayError) {
+      throw new GatewayError(response.status, relayError.error, false, parseRetryAfterMs(response), relayError.code);
+    }
   }
 
   return response;
+}
+
+/**
+ * `Retry-After` as milliseconds, for the two statuses that carry one here.
+ * Seconds only - the relay never sends the HTTP-date form - and never guessed
+ * when the header is absent or unparseable.
+ */
+function parseRetryAfterMs(response: Response): number | undefined {
+  const raw = response.headers.get("retry-after");
+  if (!raw) return undefined;
+  const seconds = Number(raw.trim());
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.round(seconds * 1000);
 }
 
 /**

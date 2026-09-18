@@ -77,15 +77,20 @@ function createRateLimiter(perMinute: number) {
   }, 60_000);
   sweep.unref();
 
-  return (key: string): boolean => {
+  return (key: string): { limited: boolean; retryAfterSeconds: number } => {
     const now = Date.now();
     const bucket = buckets.get(key);
     if (!bucket || now > bucket.resetAt) {
       buckets.set(key, { count: 1, resetAt: now + 60_000 });
-      return false;
+      return { limited: false, retryAfterSeconds: 0 };
     }
     bucket.count += 1;
-    return bucket.count > perMinute;
+    // The window's remaining time, which the caller sends as Retry-After. The
+    // client would otherwise have to assume a full window - freeProxyScan.ts
+    // did exactly that, and its own comment said it was guessing because
+    // there was no header to read. Telling it makes a scan both gentler and
+    // faster, and stops a server constant being duplicated in client code.
+    return { limited: bucket.count > perMinute, retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
   };
 }
 
@@ -309,7 +314,7 @@ async function handleRelay(
   request: FastifyRequest,
   reply: FastifyReply,
   config: RelayConfig,
-  rateLimited: (key: string) => boolean,
+  rateLimited: (key: string) => { limited: boolean; retryAfterSeconds: number },
   tunnels: { tryAcquire(): (() => void) | null }
 ): Promise<unknown> {
   const origin = request.headers.origin;
@@ -324,9 +329,13 @@ async function handleRelay(
   const clientKey = String(
     request.headers["cf-connecting-ip"] ?? request.socket.remoteAddress ?? "unknown"
   );
-  if (rateLimited(clientKey)) {
+  const limit = rateLimited(clientKey);
+  if (limit.limited) {
     recordRejection("rate_limited");
-    return reply.code(429).send({ error: "Too many requests. Try again shortly.", code: "rate_limited" });
+    return reply
+      .header("Retry-After", String(limit.retryAfterSeconds))
+      .code(429)
+      .send({ error: "Too many requests. Try again shortly.", code: "rate_limited" });
   }
 
   if (!config.workerUrl || !config.relaySecret) {
