@@ -929,7 +929,10 @@ export default function App() {
           abortRef.current = null;
           setStreaming(false);
           // Drop the placeholder if it produced nothing (aborted immediately or
-          // a pure tool-call turn with no text).
+          // a pure tool-call turn with no text). A file-only reply - the whole
+          // answer inside a <fachoy-artifact> tag or a fenced code block, with
+          // no surrounding chat prose - leaves `content` empty too, so `files`
+          // must count as "produced something" or this deletes the answer.
           updateConvo(convoId, (c) => ({
             ...c,
             messages: c.messages.filter(
@@ -939,6 +942,7 @@ export default function App() {
                   !m.content &&
                   !m.error &&
                   !m.reasoning &&
+                  !(m.files && m.files.length > 0) &&
                   !(m.toolCalls && m.toolCalls.length > 0)
                 )
             ),
