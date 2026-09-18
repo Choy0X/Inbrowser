@@ -48,8 +48,11 @@ import {
   sanitizeResponseHeaders,
 } from "./forward.ts";
 import { openTunnel, TunnelError } from "./workerTunnel.ts";
+import { wrapTls } from "./forward.ts";
 import { VERSION, type RelayConfig } from "./config.ts";
 import { recordRejection, recordTtfb, recordTunnelClose, recordTunnelOpen } from "./metrics.ts";
+import { bindAgent, TunnelPool, type PooledConnection } from "./tunnelPool.ts";
+import { deriveBucket } from "./crypto.ts";
 import { parseDayPart, selectSuggestions, type Capability } from "./suggestions.ts";
 
 /** Set on every response so the page is cross-origin isolated. */
@@ -269,8 +272,9 @@ export function buildApp(config: RelayConfig): FastifyInstance {
 
   const rateLimited = createRateLimiter(config.rateLimitPerMinute);
   const tunnels = createTunnelSemaphore(config.maxInflightTunnels);
+  const pool = config.poolTunnels && config.relaySecret ? new TunnelPool(config.relaySecret) : null;
 
-  app.post("/v1/fetch", async (request, reply) => handleRelay(request, reply, config, rateLimited, tunnels));
+  app.post("/v1/fetch", async (request, reply) => handleRelay(request, reply, config, rateLimited, tunnels, pool));
 
   /**
    * Starter prompts for the chat empty state.
@@ -315,7 +319,8 @@ async function handleRelay(
   reply: FastifyReply,
   config: RelayConfig,
   rateLimited: (key: string) => { limited: boolean; retryAfterSeconds: number },
-  tunnels: { tryAcquire(): (() => void) | null }
+  tunnels: { tryAcquire(): (() => void) | null },
+  pool: TunnelPool | null
 ): Promise<unknown> {
   const origin = request.headers.origin;
 
@@ -385,7 +390,24 @@ async function handleRelay(
       .send({ error: "The relay is at capacity. Try again in a moment.", code: "relay_at_capacity" });
   }
 
+  // A connection from the pool short-circuits the dial entirely. The key is
+  // built from the requester's own bucket first, so a hit can only ever be
+  // something this same user parked; see tunnelPool.ts.
+  let pooled: PooledConnection | null = null;
+  let canonical = "";
+  if (pool) {
+    canonical = TunnelPool.canonicalise(
+      await deriveBucket(config.relaySecret, clientKey),
+      meta.proxy,
+      { host: target.hostname, port: targetPort }
+    );
+    pooled = pool.take(canonical);
+  }
+
   let tunnel;
+  if (pooled) {
+    tunnel = pooled.duplex;
+  } else {
   try {
     tunnel = await openTunnel({
       workerUrl: config.workerUrl,
@@ -415,6 +437,7 @@ async function handleRelay(
     // the actionable JSON code. Real provider statuses are still mirrored below.
     return reply.header("Cache-Control", "no-store").code(503).send({ error: message, code });
   }
+  }
 
   // From here the tunnel exists, so it must be accounted for exactly once on
   // every path out. `release` is idempotent and `closeTunnel` wraps it with the
@@ -429,6 +452,32 @@ async function handleRelay(
     release();
   };
 
+  // On a miss with pooling on, the TLS session and its agent are built HERE
+  // rather than inside forward(), because they are part of what gets parked -
+  // a pooled connection is a tunnel, the TLS session inside it, and the agent
+  // holding that session, and forward() has no way to hand those back.
+  if (pool && !pooled) {
+    try {
+      const socket =
+        target.protocol === "https:"
+          ? await wrapTls(tunnel, target.hostname, meta.proxy.allowInsecureTls)
+          : tunnel;
+      pooled = {
+        duplex: tunnel,
+        socket,
+        agent: bindAgent(socket),
+        canonical,
+        openedAt: Date.now(),
+        inUse: true,
+      };
+    } catch {
+      // The TLS handshake failed. Fall through unpooled and let forward()
+      // fail the same way it would have, so the error the client sees is
+      // unchanged by whether pooling happens to be on.
+      pooled = null;
+    }
+  }
+
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
   // The content-type parser above handed back the untouched stream.
   const body = hasBody ? (request.body as NodeJS.ReadableStream | null) : null;
@@ -436,7 +485,13 @@ async function handleRelay(
   const forwardStartedAt = Date.now();
 
   try {
-    const result = await forward({ meta, tunnel, body, allowInsecureTls: meta.proxy.allowInsecureTls });
+    const result = await forward({
+      meta,
+      tunnel,
+      body,
+      allowInsecureTls: meta.proxy.allowInsecureTls,
+      reuse: pooled ? { socket: pooled.socket, agent: pooled.agent } : undefined,
+    });
 
     // Hijacked rather than reply.send(stream): this path mirrors an arbitrary
     // upstream status and header set and must not have Fastify re-frame it. A
@@ -453,15 +508,39 @@ async function handleRelay(
       "Cache-Control": "no-store",
     });
 
+    // Only a response read to its end, on a connection the upstream left
+    // reusable, is ever offered back. Anything else - an abort, an error, a
+    // body nobody finished - is destroyed, because a socket with unread bytes
+    // handed to the next request would have it parse the tail of this reply as
+    // its status line. That is the likeliest way pooling goes wrong, so the
+    // default on every other path is to throw the connection away.
+    let complete = false;
+    result.body.on("end", () => {
+      complete = true;
+    });
+
     result.body.pipe(raw);
     result.body.on("error", () => raw.destroy());
     raw.on("close", () => {
-      (result.body as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-      tunnel.destroy();
+      const body = result.body as NodeJS.ReadableStream & { destroy?: () => void };
+      // `complete` says the provider's body reached its end; `writableFinished`
+      // says our own response was written out in full. Both, and nothing else -
+      // `destroyed` is NOT a signal here, because a ServerResponse is destroyed
+      // as part of closing normally, so checking it would reject every healthy
+      // response and quietly disable pooling altogether.
+      const clean = complete && raw.writableFinished;
+      if (pool && pooled && result.reusable && clean) {
+        pool.give(pooled);
+      } else {
+        if (pooled && pool) pool.discard(pooled);
+        body.destroy?.();
+        tunnel.destroy();
+      }
       closeTunnel();
     });
     return reply;
   } catch (err) {
+    if (pooled && pool) pool.discard(pooled);
     tunnel.destroy();
     closeTunnel();
     if (reply.sent || reply.raw.headersSent) {

@@ -27,6 +27,13 @@ export interface ForwardResult {
   status: number;
   headers: http.IncomingHttpHeaders;
   body: NodeJS.ReadableStream;
+  /**
+   * Whether this response leaves the connection reusable. False whenever the
+   * upstream said otherwise or framed the body by EOF - in which case "the
+   * response ended" and "the socket ended" are the same event and there is
+   * nothing left to reuse.
+   */
+  reusable: boolean;
 }
 
 const TLS_ERROR_CODES = new Set([
@@ -107,17 +114,27 @@ export interface ForwardOptions {
    * default, never process-wide. See `wrapTls()` below for how this is guarded.
    */
   allowInsecureTls?: boolean;
+  /**
+   * A socket that already speaks TLS to this exact target, with the agent
+   * holding it. Present only on the pooled path; without it this opens its own,
+   * which is the unpooled behaviour and the default.
+   */
+  reuse?: { socket: Duplex; agent: http.Agent };
 }
 
 export async function forward(options: ForwardOptions): Promise<ForwardResult> {
-  const { meta, tunnel, body, timeoutMs = 120_000, allowInsecureTls } = options;
+  const { meta, tunnel, body, timeoutMs = 120_000, allowInsecureTls, reuse } = options;
   const url = new URL(meta.target);
   const isTls = url.protocol === "https:";
   const port = url.port ? Number(url.port) : isTls ? 443 : 80;
 
-  const socket: Duplex = isTls
-    ? await wrapTls(tunnel, url.hostname, allowInsecureTls)
-    : tunnel;
+  // A reused connection brings its own already-negotiated socket. Wrapping it
+  // again would start a second TLS session inside the first.
+  const socket: Duplex = reuse
+    ? reuse.socket
+    : isTls
+      ? await wrapTls(tunnel, url.hostname, allowInsecureTls)
+      : tunnel;
 
   return new Promise<ForwardResult>((resolve, reject) => {
     const request = http.request(
@@ -135,12 +152,16 @@ export async function forward(options: ForwardOptions): Promise<ForwardResult> {
           // removes any question of who decompresses it. Costs bandwidth,
           // removes a class of bug.
           "Accept-Encoding": "identity",
-          Connection: "close",
+          // Only asked for when there is a pool to put it back into. The
+          // unpooled path still closes, which is what makes one tunnel serving
+          // one request the default rather than something to remember.
+          Connection: reuse ? "keep-alive" : "close",
         },
-        createConnection: () => socket as never,
-        // Do NOT set agent:false. Node then creates a default Agent and ignores
-        // createConnection, bypassing the tunnel (and sending plaintext to 443
-        // for HTTPS targets). With no agent option, this callback owns the socket.
+        // A bound agent on the pooled path, a bare createConnection otherwise.
+        // Do NOT set agent:false in either case. Node then creates a default
+        // Agent and ignores createConnection, bypassing the tunnel (and sending
+        // plaintext to 443 for HTTPS targets).
+        ...(reuse ? { agent: reuse.agent } : { createConnection: () => socket as never }),
         timeout: timeoutMs,
       },
       (response) => {
@@ -148,6 +169,7 @@ export async function forward(options: ForwardOptions): Promise<ForwardResult> {
           status: response.statusCode ?? 502,
           headers: response.headers,
           body: response,
+          reusable: Boolean(reuse) && isReusable(response),
         });
       }
     );
@@ -173,7 +195,7 @@ export async function forward(options: ForwardOptions): Promise<ForwardResult> {
  */
 const DEFAULT_REJECT_UNAUTHORIZED = true;
 
-function wrapTls(tunnel: Duplex, servername: string, allowInsecureTls?: boolean): Promise<tls.TLSSocket> {
+export function wrapTls(tunnel: Duplex, servername: string, allowInsecureTls?: boolean): Promise<tls.TLSSocket> {
   return new Promise((resolve, reject) => {
     const socket = tls.connect(
       {
@@ -191,6 +213,24 @@ function wrapTls(tunnel: Duplex, servername: string, allowInsecureTls?: boolean)
     );
     socket.once("error", reject);
   });
+}
+
+/**
+ * Whether the upstream left this connection in a reusable state.
+ *
+ * Three ways it has not. It said `Connection: close`. It is HTTP/1.0 and did
+ * not opt in. Or it framed the body by closing the connection - no
+ * Content-Length and no chunked encoding - in which case the end of the
+ * response IS the end of the socket.
+ */
+function isReusable(response: http.IncomingMessage): boolean {
+  const connection = String(response.headers.connection ?? "").toLowerCase();
+  if (connection.includes("close")) return false;
+  if (response.httpVersion === "1.0" && !connection.includes("keep-alive")) return false;
+  const framed =
+    response.headers["content-length"] !== undefined ||
+    String(response.headers["transfer-encoding"] ?? "").toLowerCase().includes("chunked");
+  return framed;
 }
 
 /** Response headers safe to mirror back to the browser. */

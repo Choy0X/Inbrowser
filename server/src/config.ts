@@ -66,6 +66,12 @@ export interface RelayConfig {
   maxInflightTunnels: number;
   /** Cluster workers to fork. 1 runs everything in one process, as before. */
   clusterWorkers: number;
+  /**
+   * Reuse a tunnel across requests. Off by default, deliberately - read the
+   * header of tunnelPool.ts before turning it on, and measure the hit rate
+   * first, because for this app's two dial-heavy workloads it is near zero.
+   */
+  poolTunnels: boolean;
 }
 
 /**
@@ -89,6 +95,7 @@ interface ServerSection {
   metricsPort?: number;
   maxInflightTunnels?: number;
   clusterWorkers?: number;
+  poolTunnels?: boolean;
 }
 
 function readServerSection(): ServerSection {
@@ -190,6 +197,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     metricsPort: countFrom(env.METRICS_PORT, file.metricsPort ?? 0),
     maxInflightTunnels: countFrom(env.MAX_INFLIGHT_TUNNELS, file.maxInflightTunnels ?? 750),
     clusterWorkers: countFrom(env.CLUSTER_WORKERS, file.clusterWorkers ?? 1),
+    poolTunnels: env.POOL_TUNNELS !== undefined ? env.POOL_TUNNELS === "1" : Boolean(file.poolTunnels),
   };
 }
 
