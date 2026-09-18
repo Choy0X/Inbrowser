@@ -1,13 +1,16 @@
-import * as esbuild from "esbuild-wasm";
-import wasmUrl from "esbuild-wasm/esbuild.wasm?url";
 import { requestInputSync } from "../lib/codeRunners/interactiveStdin";
+import { bundleScript } from "../lib/codeRunners/npmModules";
+import { createModuleShims, processShim } from "./moduleShims";
 
 /**
- * TypeScript, transpiled with esbuild-wasm and then executed in this worker.
+ * TypeScript, bundled with esbuild-wasm and then executed in this worker.
  *
- * Transpile-only: types are erased, never checked. That is the honest scope -
- * a full type check needs the TypeScript compiler, which is an order of
- * magnitude larger, and the point here is to run a generated snippet.
+ * Transpile-only as far as types go: they're erased, never checked. That is
+ * the honest scope - a full type check needs the TypeScript compiler, which is
+ * an order of magnitude larger, and the point here is to run a generated
+ * snippet. Module resolution, unlike types, is real: `bundleScript` (see
+ * npmModules.ts) resolves Node built-ins and real npm packages (fetched from
+ * esm.sh) into the one output bundle below.
  *
  * Execution mirrors jsRunnerWorker: `new Function` with an injected console.
  *
@@ -24,6 +27,9 @@ type InMessage =
 type OutMessage =
   | { kind: "ready"; runId: string }
   | { kind: "stdout" | "stderr"; runId: string; line: string }
+  /** CDN fetch progress ("Fetching lodash@4.17.21...") - neither the program's
+   *  output nor an error, mirrors pyodideWorker.ts's loader chatter. */
+  | { kind: "status"; runId: string; line: string }
   | { kind: "done"; runId: string }
   | { kind: "error"; runId: string; message: string }
   | { kind: "input-request"; runId: string; prompt: string };
@@ -96,51 +102,13 @@ function input(prompt?: string): string | null {
 }
 
 /**
- * Models write idiomatic Node CLI scripts - `import * as readline from
- * "readline"` then `rl.question(...)` - because they don't know this sandbox
- * already exposes `input()` directly. Rather than fail those scripts outright,
- * `readline`'s `createInterface().question` is shimmed on top of the same
- * synchronous `input()` above; `readline/promises` gets the Promise-returning
- * variant. There is no other module resolution - `require()` throws a message
- * pointing back at `input()`/`console` for anything else, instead of letting a
- * bare specifier crash as a confusing ReferenceError deep in generated code.
+ * Node built-ins and real npm packages both resolve now (see npmModules.ts);
+ * `require()` for anything left `external` by that bundling step - readline,
+ * process, fs, http/https - is satisfied here. `resetForRun` clears the
+ * ephemeral `fs` shim's contents so they don't leak from one run into the
+ * next in a warm, reused worker.
  */
-const READLINE_SPECIFIERS = new Set(["readline", "node:readline"]);
-const READLINE_PROMISES_SPECIFIERS = new Set(["readline/promises", "node:readline/promises"]);
-
-function makeReadlineShim(promisesApi: boolean) {
-  return {
-    createInterface: () =>
-      promisesApi
-        ? {
-            question: (query?: string) => Promise.resolve(input(query) ?? ""),
-            close: () => {},
-          }
-        : {
-            question: (query: string | undefined, callback: (answer: string) => void) =>
-              callback(input(query) ?? ""),
-            close: () => {},
-          },
-  };
-}
-
-function requireShim(specifier: string): unknown {
-  if (READLINE_SPECIFIERS.has(specifier)) return makeReadlineShim(false);
-  if (READLINE_PROMISES_SPECIFIERS.has(specifier)) return makeReadlineShim(true);
-  throw new Error(
-    `Cannot import "${specifier}": this sandbox has no npm or Node module resolution. Only "readline" is ` +
-      `shimmed (backed by input()) - call input()/console directly instead of importing anything else.`
-  );
-}
-
-/** Enough of Node's `process` that `readline.createInterface({ input: process.stdin, ... })` doesn't throw a bare ReferenceError; the shim above ignores the values. */
-const processShim = { stdin: {}, stdout: {}, argv: [], env: {} };
-
-let ready: Promise<void> | null = null;
-function initEsbuild(): Promise<void> {
-  if (!ready) ready = esbuild.initialize({ wasmURL: wasmUrl, worker: false });
-  return ready;
-}
+const { requireShim, resetForRun } = createModuleShims(input);
 
 function format(value: unknown): string {
   if (typeof value === "string") return value;
@@ -168,20 +136,16 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
   const { runId, code, interactive, buffer } = event.data;
   currentRunId = runId;
   currentInputBuffer = interactive ? buffer : undefined;
+  resetForRun();
 
   try {
-    await initEsbuild();
     // cjs, not esm: this runs inside `new Function`, a plain function body,
     // not a module - a top-level `import`/`export` there is a SyntaxError
-    // ("Cannot use import statement outside a module"), which esbuild's
-    // transform never strips because transform() only rewrites syntax, it
-    // never resolves or bundles modules. cjs format rewrites imports to
-    // `require()` calls instead, which we can actually satisfy ourselves.
-    const { code: js } = await esbuild.transform(code, {
-      loader: "ts",
-      format: "cjs",
-      target: "es2022",
-    });
+    // ("Cannot use import statement outside a module"). bundleScript's cjs
+    // output rewrites imports to `require()` calls (for anything left
+    // external) or inlines them directly (Node built-ins with a polyfill, and
+    // real npm packages fetched from esm.sh) - see npmModules.ts.
+    const js = await bundleScript(code, "ts", (line) => post({ kind: "status", runId, line }));
     post({ kind: "ready", runId });
 
     const fn = new Function(

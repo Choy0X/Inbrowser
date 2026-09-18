@@ -1,5 +1,7 @@
 /// <reference lib="webworker" />
 import { requestInputSync } from "../lib/codeRunners/interactiveStdin";
+import { bundleScript } from "../lib/codeRunners/npmModules";
+import { createModuleShims, processShim } from "./moduleShims";
 
 export {};
 
@@ -8,8 +10,9 @@ export {};
 // thread boundary, and typically still shares the main render thread — a
 // `while(true){}` there would freeze the whole tab, Stop button included. A
 // Worker gives genuine OS-thread isolation, so `worker.terminate()` is a real
-// hard-stop. No asset loading, no plugin/cache involvement — this runner is
-// builtin and needs nothing installed.
+// hard-stop. Brought to parity with typescriptWorker.ts: code is bundled with
+// esbuild-wasm first (see npmModules.ts) so `import`/`require` of Node
+// built-ins and real npm packages work here too, not just plain script.
 
 type InMessage =
   | { kind: "run"; runId: string; code: string; interactive?: boolean; buffer?: SharedArrayBuffer }
@@ -17,6 +20,8 @@ type InMessage =
 type OutMessage =
   | { kind: "ready"; runId: string }
   | { kind: "stdout" | "stderr"; runId: string; line: string }
+  /** CDN fetch progress ("Fetching lodash@4.17.21...") - see typescriptWorker.ts. */
+  | { kind: "status"; runId: string; line: string }
   | { kind: "done"; runId: string }
   | { kind: "error"; runId: string; message: string }
   | { kind: "input-request"; runId: string; prompt: string };
@@ -99,6 +104,9 @@ function input(prompt?: string): string | null {
   }
 }
 
+/** Node built-ins and real npm packages resolve via bundleScript (npmModules.ts); this satisfies whatever it leaves external. */
+const { requireShim, resetForRun } = createModuleShims(input);
+
 function stringifyArg(arg: unknown): string {
   if (typeof arg === "string") return arg;
   if (arg instanceof Error) return arg.stack || arg.message;
@@ -126,20 +134,29 @@ self.onmessage = async (event: MessageEvent<InMessage>) => {
   const { runId, code, interactive, buffer } = event.data;
   currentRunId = runId;
   currentInputBuffer = interactive ? buffer : undefined;
-  post({ kind: "ready", runId });
+  resetForRun();
   try {
+    // cjs, not esm - see typescriptWorker.ts's identical comment. bundleScript
+    // rewrites imports to `require()` (external specifiers) or inlines them
+    // directly (polyfilled built-ins, real npm packages from esm.sh).
+    const js = await bundleScript(code, "js", (line) => post({ kind: "status", runId, line }));
+    post({ kind: "ready", runId });
     // eslint-disable-next-line no-new-func
     const fn = new Function(
       "console",
       "input",
+      "require",
+      "process",
       "__drainOrphanedWork",
-      `"use strict"; return (async () => {\n${code}\n  await __drainOrphanedWork();\n})();`
+      `"use strict"; var exports = {}; var module = { exports: exports }; return (async () => {\n${js}\n  await __drainOrphanedWork();\n})();`
     ) as (
       consoleObj: ReturnType<typeof makeConsole>,
       inputFn: typeof input,
+      requireFn: typeof requireShim,
+      processObj: typeof processShim,
       drain: typeof drainOrphanedWork
     ) => Promise<unknown>;
-    await fn(makeConsole(runId), input, drainOrphanedWork);
+    await fn(makeConsole(runId), input, requireShim, processShim, drainOrphanedWork);
     post({ kind: "done", runId });
   } catch (err) {
     post({ kind: "error", runId, message: err instanceof Error ? err.message : String(err) });

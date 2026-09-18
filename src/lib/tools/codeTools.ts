@@ -42,13 +42,19 @@ const runCode: ToolHandler = {
         "Execute a snippet of code in this browser and return whatever it prints. Use it to compute results, " +
         "check your own work, or process data - never guess at arithmetic or parsing you could just run. " +
         `Installed languages: ${availableLanguages().join(", ") || "none"}. ` +
-        "The code runs sandboxed with no file system, and is killed after a timeout. " +
+        "The code is killed after a timeout, and any file system it sees is in-memory only and thrown away " +
+        "when the run ends - never a real, persistent disk. " +
         (availableLanguages().includes("python")
           ? "Python can reach the real network via urllib or requests, subject to normal browser CORS rules " +
             "(only CORS-enabled endpoints are reachable) - the first network call in a session may take a few " +
             "seconds while the HTTP backend installs. "
           : "") +
-        "No other language here has network access. There is no interactive input either - never call input() " +
+        (availableLanguages().includes("javascript") || availableLanguages().includes("typescript")
+          ? "JavaScript/TypeScript can also import real npm packages (fetched from a CDN the first time, then " +
+            "cached) and most Node built-ins (fs, path, crypto, http/https via fetch(), events, util, buffer, " +
+            "...) - only raw sockets/processes (net, dns, child_process, ...) aren't available. "
+          : "") +
+        "There is no interactive input either - never call input() " +
         "or read from stdin; take any values the program needs as hardcoded constants or function arguments " +
         "instead. There is also no command line: argv is always empty, so never write a script that checks " +
         "len(sys.argv)/argparse and exits or prints a usage message when nothing was passed - call your " +
@@ -93,16 +99,22 @@ const runCode: ToolHandler = {
 
     const out: string[] = [];
     const err: string[] = [];
+    const status: string[] = [];
     try {
       const outcome = await runner.run(code, {
         onStdout: (line) => out.push(line),
         onStderr: (line) => err.push(line),
+        // Fetch progress for a not-yet-cached npm package (see npmModules.ts) -
+        // without this a slow or offline CDN fetch just looks like a hang,
+        // since nothing else reaches the model until the run finishes.
+        onStatus: (line) => status.push(line),
         signal: controller.signal,
       });
 
       const stdout = out.join("\n").slice(0, OUTPUT_LIMIT);
       const stderr = err.join("\n").slice(0, OUTPUT_LIMIT);
       const parts: string[] = [];
+      if (status.length > 0) parts.push(`status:\n${status.join("\n")}`);
       if (stdout) parts.push(`stdout:\n${stdout}`);
       if (stderr) parts.push(`stderr:\n${stderr}`);
 
